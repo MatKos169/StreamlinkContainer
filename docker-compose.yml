@@ -1,7 +1,7 @@
-version: '3.7'
+version: '1.0'
 
 x-common: &common
-    image: ghcr.io/liofal/streamlink:3.1.1
+    image: ghcr.io/MatKos169/StreamlinkContainer:1.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -31,9 +31,7 @@ services:
   streamlink-latest:
     <<: *common
     container_name: streamlink-latest_${TWITCH}
-    image: ghcr.io/liofal/streamlink:latest
+    image: ghcr.io/MatKos169/StreamlinkContainer:latest
     environment:
       - user=${TWITCH}
       - quality=best
-
-      
