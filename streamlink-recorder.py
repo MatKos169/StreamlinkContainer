@@ -177,9 +177,10 @@ def loop_check(config):
                 time.sleep(config.timer)
                 continue
             safe_title = re.sub(r"[^\w\s._-]|[<>:\"/\\|?*]", "", title)
+            safe_title = re.sub(" +", " ", safe_title)
             safe_title = os.path.basename(safe_title)
-            filename = f"{config.user} - {datetime.datetime.now().strftime('%Y-%m-%d %H-%M-%S')} - {safe_title}"
-            recorded_filename = os.path.join("./download/", filename)
+            filename = f"{datetime.datetime.now().strftime('%H-%M-%S')} - {safe_title}.mp4"
+            recorded_filename = os.path.join("./download/", config.user,"/", datetime.datetime.now().strftime('%Y-%m-%d'), filename)
             message = f"Recording {config.user} ..."
             notifier_manager.notify_all(message)
             logger.info(message)
