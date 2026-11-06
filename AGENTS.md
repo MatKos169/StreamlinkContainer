@@ -28,8 +28,19 @@ The recorder must keep working when the web container or all converters are down
 - `streams.json`, `status.json`, `job.json` and `claim.json` are written atomically (`streams.write_json_atomic`).
 - Job folders change state only by `os.rename` (`jobs.move`); that is what makes claims exclusive across converters. Never copy-then-delete between states.
 - Output paths in `job.json` go through `clean_output_path` again in the converter (`place_file`); never overwrite an existing file in `/recordings`.
-- The web UI only answers clients in `ALLOWED_NETWORKS`; mutating API calls require `Content-Type: application/json`.
+- The web UI only answers clients in `ALLOWED_NETWORKS`; mutating API calls require `Content-Type: application/json`; API errors are JSON.
+- Containers talk to each other only through files on shared volumes, never over the network. The only listeners are the web UI (HTTPS by default, key in `/config/tls`, never served).
 - Containers run non-root with a read-only root filesystem; only `/config`, `/recordings` and `/tmp` are writable.
+
+## Documentation
+
+Keep the docs up to date in the same commit as every change:
+- `README.md`
+- `docs/CONFIGURATION.md`: env vars and features
+- `docs/ARCHITECTURE.md`: files, timings, HTTP API
+- `docs/DEPLOYMENT.md`
+- `app/static/openapi.yaml`: every route; `tests/test_openapi.py` fails when spec and routes differ
+- the comments in `default.env`
 
 ## Commits
 

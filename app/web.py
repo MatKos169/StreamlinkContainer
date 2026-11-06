@@ -14,7 +14,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import jobs, vod
+from . import jobs, tls, vod
 from .naming import FOLDER_LAYOUTS
 from .recording import conversion_settings
 from .settings import SettingsError, load_settings
@@ -45,6 +45,17 @@ async def ip_allowlist(request, handler):
     return await handler(request)
 
 
+@web.middleware
+async def json_errors(request, handler):
+    """API errors always as {"error": "..."} (also 403/404/405/415 raised by aiohttp)."""
+    try:
+        return await handler(request)
+    except web.HTTPException as error:
+        if error.status < 400 or not request.path.startswith("/api/"):
+            raise
+        return web.json_response({"error": error.text or error.reason}, status=error.status)
+
+
 def _error(status, message):
     return web.json_response({"error": message}, status=status)
 
@@ -69,6 +80,10 @@ def _duplicate(streams, candidate):
 
 async def index(request):
     return web.FileResponse(STATIC_DIR / "index.html")
+
+
+async def openapi(request):
+    return web.FileResponse(STATIC_DIR / "openapi.yaml", headers={"Content-Type": "application/yaml"})
 
 
 async def list_streams(request):
@@ -295,11 +310,12 @@ async def get_status(request):
 
 
 def create_app(settings):
-    app = web.Application(middlewares=[ip_allowlist], client_max_size=64 * 1024)
+    app = web.Application(middlewares=[json_errors, ip_allowlist], client_max_size=64 * 1024)
     app[SETTINGS_KEY] = settings
     app[LOCK_KEY] = threading.Lock()
     app.add_routes([
         web.get("/", index),
+        web.get("/api/openapi.yaml", openapi),
         web.get("/api/streams", list_streams),
         web.post("/api/streams", create_stream),
         web.put("/api/streams/{id}", update_stream),
@@ -331,7 +347,24 @@ def main():
         sys.exit(2)
     os.makedirs(settings.config_dir, exist_ok=True)
     logger.info("Allowed networks: %s", ", ".join(str(n) for n in settings.allowed_networks))
-    web.run_app(create_app(settings), port=settings.web_port, access_log=None)
+    ssl_context = None
+    if settings.web_tls:
+        try:
+            cert, key, generated = tls.prepare(settings)
+            ssl_context = tls.server_context(cert, key)
+        except (OSError, ValueError) as error:
+            logger.error("TLS setup failed: %s", type(error).__name__ if not isinstance(error, FileNotFoundError) else error)
+            sys.exit(2)
+        logger.info("HTTPS with %s certificate %s, SHA-256 fingerprint %s",
+                    "own" if settings.tls_custom else ("new self-signed" if generated else "self-signed"),
+                    cert, tls.fingerprint(cert))
+    else:
+        logger.warning("WEB_TLS=false: serving plain HTTP (only behind a TLS reverse proxy)")
+    logger.info("Web UI on %s://0.0.0.0:%d (API description: /api/openapi.yaml)",
+                "https" if ssl_context else "http", settings.web_port)
+    web.run_app(create_app(settings), port=settings.web_port, access_log=None, ssl_context=ssl_context,
+                print=lambda *_: None)
+    
 
 
 if __name__ == "__main__":

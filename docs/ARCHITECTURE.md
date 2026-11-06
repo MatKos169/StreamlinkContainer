@@ -1,7 +1,9 @@
 # Technische Kommunikation zwischen den Containern
 
 Die Container sprechen **nicht über das Netzwerk miteinander**. Sie tauschen sich ausschließlich
-über Dateien auf gemeinsamen Volumes aus. Dadurch:
+über Dateien auf gemeinsamen Volumes aus. Die einzigen Netzwerkverbindungen sind der Browser zum
+Webinterface (HTTPS) und der Recorder zu Twitch (HTTPS), siehe
+[Verbindungen](#verbindungen-nach-außen). Dadurch:
 
 - läuft der Recorder weiter, wenn das Webinterface oder alle Konverter aus sind,
 - können Konverter auf anderen Hosts laufen, solange sie dieselbe Freigabe sehen (z. B. NFS),
@@ -14,7 +16,7 @@ Einstellungen und Bedienung: [CONFIGURATION.md](CONFIGURATION.md). Aufbau-Beispi
 
 ```mermaid
 flowchart LR
-    user([Browser im LAN]) -- HTTP :8080 --> web
+    user([Browser im LAN]) -- "HTTPS :8080" --> web
     subgraph config["/config"]
         streams[streams.json]
         status[status.json]
@@ -199,12 +201,16 @@ versuchen“ schreibt das Webinterface die aktuellen Werte in den Job.
 
 ## HTTP-API des Webinterface
 
-Alle Antworten sind JSON, alle ändernden Aufrufe verlangen `Content-Type: application/json`.
-Zugriff nur aus `ALLOWED_NETWORKS`.
+Vollständig beschrieben als OpenAPI 3.1 in [`app/static/openapi.yaml`](../app/static/openapi.yaml),
+im laufenden Betrieb abrufbar unter `https://<host>:8080/api/openapi.yaml`. Ein Test stellt sicher,
+dass die Beschreibung genau den Routen des Servers entspricht. Alle Antworten sind JSON, auch Fehler
+(`{"error": "..."}`). Alle ändernden Aufrufe verlangen `Content-Type: application/json`. Zugriff
+nur aus `ALLOWED_NETWORKS`.
 
 | Methode und Pfad | Zweck |
 |---|---|
 | `GET /` | Weboberfläche |
+| `GET /api/openapi.yaml` | API-Beschreibung (OpenAPI 3.1) |
 | `GET /api/streams` | Kanalliste |
 | `POST /api/streams` | Kanal anlegen: `{channel, output?, quality?, enabled?}` |
 | `PUT /api/streams/{id}` | Kanal ändern (einzelne Felder) |
@@ -229,4 +235,11 @@ Zugriff nur aus `ALLOWED_NETWORKS`.
 |---|---|---|
 | recorder | `id.twitch.tv`, `api.twitch.tv` (Helix) | App-Token, Live-Status, Kategorien, VOD-Metadaten |
 | recorder | Twitch über streamlink (`gql.twitch.tv`, `usher.ttvnw.net`, Video-CDN) | Zugriffstoken, Playlists und Videosegmente. Das macht das Twitch-Plugin von streamlink |
+| Browser im LAN | web (HTTPS, TLS ≥ 1.2, selbstsigniert oder eigenes Zertifikat) | Weboberfläche und API |
 | converter, web | – | Keine Verbindungen nach außen |
+
+**Dateien über das Netz:** Liegen `/work` oder `/recordings` auf einer NFS-Freigabe, laufen
+die Dateien über das Netzwerk. NFS selbst ist unverschlüsselt, solange es nicht mit Kerberos
+(`sec=krb5p`) eingehängt wird. Im Heimnetz ist das üblich. Sollen auch diese Daten verschlüsselt
+übertragen werden, die Freigabe mit `krb5p` oder über einen VPN-Tunnel (z. B. WireGuard) zwischen
+den Hosts einhängen.

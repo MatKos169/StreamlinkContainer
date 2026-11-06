@@ -35,6 +35,15 @@ def parse_int(value, name, minimum):
     return number
 
 
+def parse_bool(value, name):
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise SettingsError(f"{name} must be true or false")
+
+
 def parse_networks(value):
     """Parse a comma-separated list of IPs/CIDRs ("10.0.0.0/24,192.168.1.5")."""
     networks = []
@@ -63,6 +72,11 @@ class Settings:
     oauth_token: str = None
     allowed_networks: list = field(default_factory=lambda: parse_networks(DEFAULT_ALLOWED_NETWORKS))
     web_port: int = 8080
+    web_tls: bool = True
+    tls_cert_file: str = "/config/tls/cert.pem"
+    tls_key_file: str = "/config/tls/key.pem"
+    tls_custom: bool = False          # own certificate given: never generate or replace it
+    tls_hostnames: list = field(default_factory=list)
 
     @property
     def streams_file(self):
@@ -109,7 +123,16 @@ def load_settings(require_twitch=False):
         oauth_token=env("TWITCH_OAUTH_TOKEN", "TWITCH_AUTH_TOKEN", "oauthtoken"),
         allowed_networks=parse_networks(env("ALLOWED_NETWORKS", default=DEFAULT_ALLOWED_NETWORKS)),
         web_port=parse_int(env("WEB_PORT", default=8080), "WEB_PORT", 1),
+        web_tls=parse_bool(env("WEB_TLS", default="true"), "WEB_TLS"),
+        tls_hostnames=[h.strip() for h in (env("TLS_HOSTNAMES") or "").split(",") if h.strip()],
     )
+    config_dir = settings.config_dir
+    cert, key = env("TLS_CERT_FILE"), env("TLS_KEY_FILE")
+    if bool(cert) != bool(key):
+        raise SettingsError("set both TLS_CERT_FILE and TLS_KEY_FILE, or neither")
+    settings.tls_custom = bool(cert)
+    settings.tls_cert_file = cert or os.path.join(config_dir, "tls", "cert.pem")
+    settings.tls_key_file = key or os.path.join(config_dir, "tls", "key.pem")
     if require_twitch and not (settings.client_id and settings.client_secret):
         raise SettingsError("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are required")
     return settings

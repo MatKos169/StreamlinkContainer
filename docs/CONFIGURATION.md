@@ -61,6 +61,17 @@ Kategorie, VOD-Metadaten. Der OAuth-Token geht nur an Twitchs API (streamlink-Op
 |---|---|---|---|
 | `ALLOWED_NETWORKS` | alle privaten Netze: `127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7` | W | Kommagetrennte IPs oder Netze, die das Webinterface nutzen dürfen. Alle anderen bekommen `403`. Die mitgelieferte `default.env` setzt `10.0.0.0/24,127.0.0.1` |
 | `WEB_PORT` | `8080` | W (+ Compose) | Port im Container. In der Compose-Datei zusätzlich der Port auf dem Host |
+| `WEB_TLS` | `true` | W | Webinterface per HTTPS. `false` nur hinter einem Reverse Proxy, der selbst TLS macht |
+| `TLS_HOSTNAMES` | leer | W | Zusätzliche Namen/IPs für das selbstsignierte Zertifikat, z. B. `10.0.0.196,nas.local`. `localhost`, `127.0.0.1`, `::1` und der Container-Hostname sind immer enthalten. Fehlt ein Name im Zertifikat, wird es neu erzeugt |
+| `TLS_CERT_FILE`, `TLS_KEY_FILE` | `/config/tls/cert.pem`, `/config/tls/key.pem` | W | Eigenes Zertifikat (z. B. von einer eigenen CA). Beide oder keine setzen. Ein eigenes Zertifikat wird nie ersetzt |
+
+**HTTPS:** Beim ersten Start erzeugt der Web-Container ein selbstsigniertes Zertifikat (ECDSA
+P-256, 10 Jahre gültig) in `/config/tls/`. Der Schlüssel bekommt die Rechte `0600`. Weniger als
+30 Tage vor Ablauf wird es erneuert. Der Ordner wird über das Web nie ausgeliefert. Das Log zeigt
+beim Start den SHA-256-Fingerabdruck. Den kann man mit der Zertifikatswarnung des Browsers
+vergleichen, bevor man die Ausnahme bestätigt. Erlaubt sind TLS 1.2 und neuer, auf HTTP antwortet
+der Port nicht. Wird das Zertifikat neu erzeugt (neuer Name in `TLS_HOSTNAMES`, Ablauf), muss
+der Browser es erneut bestätigen.
 
 Zugriffe auf `localhost` des Docker-Hosts kommen im Container von der Bridge-Adresse an (z. B.
 `172.19.0.1`). Für einen Reverse Proxy muss dessen IP erlaubt sein.
@@ -234,6 +245,9 @@ Dateien.
 
 ### Zugriffsschutz und Sicherheit
 
+- Das Webinterface läuft per HTTPS (siehe oben), die Container untereinander kommunizieren nur
+  über Dateien. Die HTTP-API ist in [`app/static/openapi.yaml`](../app/static/openapi.yaml)
+  beschrieben (OpenAPI 3.1, auch abrufbar unter `/api/openapi.yaml`).
 - Das Webinterface antwortet nur Adressen aus `ALLOWED_NETWORKS`. Ändernde API-Aufrufe verlangen
   `Content-Type: application/json`, damit fremde Webseiten keine Formulare absenden können.
 - Alle Container laufen ohne Root-Rechte mit schreibgeschütztem Dateisystem, ohne Capabilities

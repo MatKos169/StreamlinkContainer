@@ -61,7 +61,11 @@ mkdir -p config work recordings && sudo chown 1027:100 config work recordings   
 docker compose up -d --build
 ```
 
-Then open `http://<host>:8080`.
+Then open `https://<host>:8080`. The web UI uses a self-signed certificate created in
+`config/tls/` on first start. Compare its fingerprint (`docker compose logs web | grep fingerprint`)
+with the browser warning, then accept it. Put the host's address in `TLS_HOSTNAMES`. Details:
+[DEPLOYMENT.md](docs/DEPLOYMENT.md#https-und-zertifikat). The containers themselves communicate only
+through files; the web API is described in [openapi.yaml](app/static/openapi.yaml) (`/api/openapi.yaml`).
 
 Create the Twitch credentials at <https://dev.twitch.tv/console/apps> (any
 redirect URL, category "Application Integration").
@@ -138,6 +142,7 @@ Credentials, access control and paths are only set by environment variables
 | `CONVERTER_NAME` | container hostname | Converter name shown in the UI |
 | `CONVERTER_POLL_INTERVAL` | `10` | Seconds a converter waits when the queue is empty |
 | `ALLOWED_NETWORKS` | private ranges | Who may open the web UI: comma-separated IPs/CIDRs, e.g. `10.0.0.0/24,192.168.1.20` |
+| `WEB_TLS`, `TLS_HOSTNAMES`, `TLS_CERT_FILE`, `TLS_KEY_FILE` | `true`, –, `/config/tls/…` | HTTPS for the web UI: on by default with a self-signed certificate; extra host names for it; or an own certificate |
 | `TZ` | `Europe/Berlin` (in `default.env`) | Time zone for file names |
 | `PUID`, `PGID` | `1027`, `100` | User/group the containers run as (owner of the volumes) |
 | `CONFIG_PATH`, `WORK_PATH`, `RECORDINGS_PATH` | `./config`, `./work`, `./recordings` | Host folders for the volumes |

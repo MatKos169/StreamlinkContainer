@@ -74,7 +74,8 @@ RECORDINGS_PATH=/mnt/nas/media/Twitch
 WEB_PORT=8080
 ```
 
-In `default.env` das eigene Netz erlauben, z. B. `ALLOWED_NETWORKS=192.168.1.0/24`.
+In `default.env` das eigene Netz erlauben und die Adresse des Hosts ins Zertifikat aufnehmen, z. B.
+`ALLOWED_NETWORKS=192.168.1.0/24` und `TLS_HOSTNAMES=192.168.1.10,dockerhost.local`.
 
 Jellyfin dazu, z. B. als `docker-compose.override.yml` im Repo-Ordner (wird von Compose
 automatisch mitgeladen):
@@ -98,7 +99,8 @@ services:
 docker compose up -d --build
 ```
 
-Danach den Kanal im Webinterface (`http://<host>:8080`) mit einem Ausgabeordner wie `Name`
+Danach den Kanal im Webinterface (`https://<host>:8080`, beim ersten Aufruf die Warnung zum
+selbstsignierten Zertifikat bestätigen, siehe [HTTPS](#https-und-zertifikat)) mit einem Ausgabeordner wie `Name`
 anlegen. Bei der Ordnerstruktur `output_year_month` entsteht
 `/mnt/nas/media/Twitch/Name-2026/11/2026-11-06 20-15-00 - Titel.mp4`.
 
@@ -281,6 +283,33 @@ die Jobs lange liegen. Für gemischte Hosts lieber `copy` lassen.
   vergeben, ein `lxc.idmap` für 1027 einrichten oder `PUID`/`PGID` passend wählen.
 - **Docker in LXC** braucht `nesting=1` (und `keyctl=1`) in den Optionen des Containers.
 
+## HTTPS und Zertifikat
+
+- Das Webinterface läuft immer per HTTPS: `https://<host>:<WEB_PORT>`. Beim ersten Start erzeugt
+  es ein selbstsigniertes Zertifikat in `config/tls/`.
+- **Erster Aufruf:** Der Browser warnt vor dem unbekannten Zertifikat. Vorher den Fingerabdruck
+  prüfen:
+  ```bash
+  docker compose logs web | grep fingerprint
+  ```
+  Er muss mit dem übereinstimmen, den der Browser in den Zertifikatsdetails zeigt. Dann die
+  Ausnahme bestätigen.
+- **Ohne Warnung:** `config/tls/cert.pem` auf den Geräten als vertrauenswürdig importieren. Die
+  Datei ist öffentlich, `key.pem` dagegen nie weitergeben.
+- **Hostnamen:** Die Adresse, unter der das Webinterface aufgerufen wird, gehört in
+  `TLS_HOSTNAMES`, sonst passt das Zertifikat nicht zur Adresse.
+- **Eigenes Zertifikat**, z. B. von einer eigenen CA:
+  ```env
+  TLS_CERT_FILE=/config/tls/own-cert.pem
+  TLS_KEY_FILE=/config/tls/own-key.pem
+  ```
+- **Hinter einem Reverse Proxy** (Nginx Proxy Manager, Traefik, Caddy):
+  - Entweder macht der Proxy HTTPS zum Webinterface (Backend `https://`, Prüfung des
+    selbstsignierten Zertifikats im Proxy abschalten oder `cert.pem` hinterlegen).
+  - Oder `WEB_TLS=false`. Dann aber nur, wenn das Webinterface ausschließlich vom Proxy
+    erreichbar ist, also ohne veröffentlichten Port.
+  - In beiden Fällen gehört die IP des Proxys in `ALLOWED_NETWORKS`.
+
 ## Prüfen und Fehlersuche
 
 ```bash
@@ -293,6 +322,8 @@ ls /srv/streamlink/work/{recording,queue,converting,failed}
 | Symptom | Ursache / Lösung |
 |---|---|
 | Webinterface antwortet `Forbidden` | IP nicht in `ALLOWED_NETWORKS`. Im Log von `web` steht `Rejected request from <ip>` |
+| Browser: „Verbindung wurde zurückgesetzt“ / leere Seite | Mit `http://` statt `https://` aufgerufen |
+| Browser meldet falschen Namen im Zertifikat | Adresse in `TLS_HOSTNAMES` aufnehmen, Web-Container neu starten (das Zertifikat wird dann neu erzeugt) |
 | „Twitch-Abfrage fehlgeschlagen: TwitchAuthorizationException (HTTP 400)“ | `TWITCH_CLIENT_ID`/`SECRET` falsch |
 | „Worker online: 0“, Jobs bleiben in „wartet auf Konverter“ | Kein Konverter läuft, oder er sieht nicht dasselbe `/work`. Auf jedem Host prüfen, ob `ls /work/queue` dieselben Jobs zeigt |
 | Jobs landen in `failed/` mit `PermissionError` | `PUID`/`PGID` hat keine Schreibrechte auf `/recordings` bzw. die NFS-Freigabe (UID-Zuordnung prüfen) |

@@ -36,7 +36,8 @@ async def test_forbidden_outside_allowlist(tmp_path):
     client = await client_for(settings)
     try:
         assert (await client.get("/")).status == 403
-        assert (await client.get("/api/streams")).status == 403
+        r = await client.get("/api/streams")
+        assert r.status == 403 and await r.json() == {"error": "Forbidden"}
     finally:
         await client.close()
 
@@ -247,5 +248,17 @@ async def test_release_slot_api(settings):
                                   headers={"Content-Type": "text/plain"})).status == 415
         assert (await (await client.put("/api/settings", json={"slot_cooldown": 45})).json())["settings"]["slot_cooldown"] == 45
         assert (await client.put("/api/settings", json={"slot_cooldown": 3601})).status == 400
+    finally:
+        await client.close()
+
+
+
+async def test_api_errors_are_json(settings):
+    client = await client_for(settings)
+    try:
+        for method, path, kw in (("get", "/api/nope", {}), ("post", "/api/streams", {"data": "x"}),
+                                 ("delete", "/api/jobs/..", {}), ("patch", "/api/streams", {})):
+            r = await getattr(client, method)(path, **kw)
+            assert r.status >= 400 and "error" in await r.json(), (method, path)
     finally:
         await client.close()

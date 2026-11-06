@@ -5,3 +5,4 @@ streamlink==8.6.3
 twitchAPI==4.5.0
 aiohttp==3.14.5
 urllib3==2.8.0
+cryptography==50.0.2

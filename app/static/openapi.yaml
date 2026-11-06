@@ -1,0 +1,793 @@
+openapi: 3.1.0
+info:
+  title: Streamlink Recorder – Web-API
+  version: 1.0.0
+  description: |
+    JSON-API des Web-Containers (`python -m app.web`). Die Weboberfläche benutzt
+    ausschließlich diese Endpunkte.
+
+    - **Transport:** HTTPS mit selbstsigniertem Zertifikat (oder eigenem, siehe
+      `TLS_CERT_FILE`). Mit `WEB_TLS=false` HTTP, nur hinter einem TLS-Reverse-Proxy.
+    - **Zugriff:** nur Clients aus `ALLOWED_NETWORKS`, alle anderen bekommen `403`.
+      Eine Anmeldung gibt es nicht.
+    - **Ändernde Aufrufe** (`POST`, `PUT`) verlangen `Content-Type: application/json`,
+      auch bei leerem Body (`{}`). Das verhindert Formular-Posts fremder Webseiten.
+    - **Fehler** kommen immer als `{"error": "..."}`.
+    - Die Container untereinander nutzen diese API nicht. Sie kommunizieren über
+      Dateien (siehe `docs/ARCHITECTURE.md`). Änderungen wirken deshalb beim Recorder
+      innerhalb etwa einer Sekunde, nicht sofort.
+servers:
+  - url: https://{host}:{port}
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8080"
+tags:
+  - name: Kanäle
+  - name: Einstellungen
+  - name: Status
+  - name: Verarbeitung
+  - name: VOD-Downloads
+  - name: Sonstiges
+
+paths:
+  /:
+    get:
+      tags: [Sonstiges]
+      summary: Weboberfläche (HTML)
+      operationId: index
+      responses:
+        "200":
+          description: HTML-Seite
+          content:
+            text/html: {}
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/openapi.yaml:
+    get:
+      tags: [Sonstiges]
+      summary: Diese API-Beschreibung
+      operationId: openapi
+      responses:
+        "200":
+          description: OpenAPI-Dokument
+          content:
+            application/yaml: {}
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/streams:
+    get:
+      tags: [Kanäle]
+      summary: Kanalliste
+      operationId: listStreams
+      responses:
+        "200":
+          description: Alle Kanäle
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [streams]
+                properties:
+                  streams:
+                    type: array
+                    items: { $ref: "#/components/schemas/Stream" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/ConfigError" }
+    post:
+      tags: [Kanäle]
+      summary: Kanal anlegen
+      operationId: createStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StreamInput" }
+            example: { channel: "https://www.twitch.tv/somestreamer", output: "Twitch/Somestreamer", quality: "1080p60,best" }
+      responses:
+        "201":
+          description: Angelegt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stream" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Kanal ist schon eingetragen
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415": { $ref: "#/components/responses/NotJson" }
+
+  /api/streams/{id}:
+    parameters:
+      - $ref: "#/components/parameters/StreamId"
+    put:
+      tags: [Kanäle]
+      summary: Kanal ändern
+      description: Nur die übergebenen Felder werden geändert. `enabled=false` stoppt eine laufende Aufnahme.
+      operationId: updateStream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StreamPatch" }
+            example: { enabled: false }
+      responses:
+        "200":
+          description: Geänderter Kanal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stream" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Ein anderer Eintrag hat schon diesen Kanal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "415": { $ref: "#/components/responses/NotJson" }
+    delete:
+      tags: [Kanäle]
+      summary: Kanal entfernen
+      description: Eine laufende Aufnahme wird beendet und eingereiht.
+      operationId: deleteStream
+      responses:
+        "204": { description: Entfernt }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/streams/{id}/release-slot:
+    parameters:
+      - $ref: "#/components/parameters/StreamId"
+    post:
+      tags: [Kanäle]
+      summary: Reservierten Stream-Platz freigeben
+      description: |
+        Hebt die Reservierung nach Stream-Ende (`slot_cooldown`) vorzeitig auf. Der Recorder
+        übernimmt das innerhalb einer Sekunde. Die Nachprüfung läuft weiter.
+      operationId: releaseSlot
+      requestBody: { $ref: "#/components/requestBodies/Empty" }
+      responses:
+        "200":
+          description: Freigabe angefordert
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [released]
+                properties:
+                  released: { type: string, description: Stream-ID }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "415": { $ref: "#/components/responses/NotJson" }
+
+  /api/settings:
+    get:
+      tags: [Einstellungen]
+      summary: Einstellungen
+      operationId: getSettings
+      responses:
+        "200":
+          description: Wirksame Werte, Standardwerte (aus Umgebungsvariablen), gespeicherte Werte und Grenzen
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettingsResponse" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/ConfigError" }
+    put:
+      tags: [Einstellungen]
+      summary: Einstellungen ändern
+      description: |
+        `{"name": wert}` speichert einen Wert, `{"name": null}` setzt ihn auf den Standard aus der
+        Umgebungsvariable zurück. Zahlen dürfen als String kommen (`"30"`) und werden normalisiert.
+      operationId: updateSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SettingsPatch" }
+            example: { rescan_interval: 10, rescan_duration: 300, video_codec: null }
+      responses:
+        "200":
+          description: Neuer Stand
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettingsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "415": { $ref: "#/components/responses/NotJson" }
+
+  /api/status:
+    get:
+      tags: [Status]
+      summary: Zustand des Recorders
+      description: Inhalt von `/config/status.json`, `null`, solange der Recorder noch keinen geschrieben hat.
+      operationId: getStatus
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    oneOf:
+                      - $ref: "#/components/schemas/RecorderStatus"
+                      - type: "null"
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/overview:
+    get:
+      tags: [Verarbeitung]
+      summary: Übersicht der Verarbeitung
+      operationId: getOverview
+      responses:
+        "200":
+          description: Zähler, laufende Umwandlungen, Worker, zuletzt fertige Dateien, Originale, alle Jobs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Overview" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/jobs:
+    get:
+      tags: [Verarbeitung]
+      summary: Jobs je Zustand
+      operationId: listJobs
+      responses:
+        "200":
+          description: Jobs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobsByState" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/jobs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    delete:
+      tags: [Verarbeitung]
+      summary: Fehlgeschlagenen Job löschen
+      description: Löscht Video und Metadaten des Jobs in `/work/failed/`. Nur fehlgeschlagene Jobs.
+      operationId: deleteJob
+      responses:
+        "204": { description: Gelöscht }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/jobs/{id}/retry:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      tags: [Verarbeitung]
+      summary: Fehlgeschlagenen Job erneut umwandeln
+      description: Übernimmt die aktuellen Konvertierungs-Einstellungen und reiht den Job wieder ein.
+      operationId: retryJob
+      requestBody: { $ref: "#/components/requestBodies/Empty" }
+      responses:
+        "200":
+          description: Wieder eingereiht
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, state]
+                properties:
+                  id: { type: string }
+                  state: { type: string, const: queue }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "415": { $ref: "#/components/responses/NotJson" }
+        "500": { $ref: "#/components/responses/ConfigError" }
+
+  /api/done:
+    delete:
+      tags: [Verarbeitung]
+      summary: Alle aufgehobenen Originale löschen
+      description: Löscht alle Job-Ordner in `/work/done/`. Die MP4s bleiben erhalten.
+      operationId: deleteAllDone
+      responses:
+        "200":
+          description: Anzahl gelöschter Originale
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deleted" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/done/{id}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    delete:
+      tags: [Verarbeitung]
+      summary: Ein aufgehobenes Original löschen
+      operationId: deleteDone
+      responses:
+        "200":
+          description: Gelöscht
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Deleted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/downloads:
+    get:
+      tags: [VOD-Downloads]
+      summary: VOD-Downloads
+      operationId: listDownloads
+      responses:
+        "200":
+          description: Wartende/laufende (mit Status vom Recorder) und fehlgeschlagene Downloads sowie die Belegung des Stream-Limits
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Downloads" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [VOD-Downloads]
+      summary: VOD-Download anlegen
+      description: Der Recorder startet ihn, sobald `vod_parallel` und `max_parallel_streams` es zulassen.
+      operationId: createDownload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DownloadInput" }
+            example: { url: "https://www.twitch.tv/videos/2345678901", mode: realtime, speed: 2 }
+      responses:
+        "201":
+          description: Angelegt
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DownloadRequest" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "415": { $ref: "#/components/responses/NotJson" }
+
+  /api/downloads/{id}:
+    parameters:
+      - $ref: "#/components/parameters/DownloadId"
+    delete:
+      tags: [VOD-Downloads]
+      summary: Download abbrechen bzw. fehlgeschlagenen entfernen
+      description: |
+        Wartend oder laufend: Abbruch wird angefordert (`200`), Bereits Geladenes wird verworfen.
+        Fehlgeschlagen: Eintrag wird entfernt (`204`).
+      operationId: deleteDownload
+      responses:
+        "200":
+          description: Abbruch angefordert
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cancelled]
+                properties:
+                  cancelled: { type: boolean, const: true }
+        "204": { description: Fehlgeschlagener Download entfernt }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/downloads/{id}/retry:
+    parameters:
+      - $ref: "#/components/parameters/DownloadId"
+    post:
+      tags: [VOD-Downloads]
+      summary: Fehlgeschlagenen Download erneut versuchen
+      operationId: retryDownload
+      requestBody: { $ref: "#/components/requestBodies/Empty" }
+      responses:
+        "200":
+          description: Wieder eingereiht
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [retried]
+                properties:
+                  retried: { type: boolean, const: true }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "415": { $ref: "#/components/responses/NotJson" }
+
+components:
+  parameters:
+    StreamId:
+      name: id
+      in: path
+      required: true
+      description: ID des Kanal-Eintrags (nicht der Twitch-Login)
+      schema: { type: string, example: af7e2bdcae47 }
+    JobId:
+      name: id
+      in: path
+      required: true
+      description: Name des Job-Ordners in `/work`
+      schema: { type: string, example: 20261106-201500-streamer-a1b2c3 }
+    DownloadId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, example: 20261106-204336-vod2345678901-542b25 }
+
+  requestBodies:
+    Empty:
+      required: true
+      description: Leeres JSON-Objekt. Der Content-Type ist Pflicht.
+      content:
+        application/json:
+          schema: { type: object, maxProperties: 0 }
+          example: {}
+
+  responses:
+    BadRequest:
+      description: Ungültige Eingabe (Meldung beschreibt das Feld)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: "rescan_interval must be between 5 and 600 seconds" }
+    Forbidden:
+      description: Client-IP nicht in `ALLOWED_NETWORKS`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Unbekannte ID
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotJson:
+      description: Body ist kein `application/json`
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ConfigError:
+      description: "`/config/streams.json` ist ungültig"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Deleted:
+      type: object
+      required: [deleted]
+      properties:
+        deleted: { type: integer, minimum: 0 }
+
+    Quality:
+      type: string
+      pattern: "^[A-Za-z0-9_,\\s]{0,100}$"
+      description: Kommagetrennte Wunschliste, die erste vorhandene Qualität gewinnt, sonst `best`
+      example: "1080p60,720p60,best"
+
+    OutputPath:
+      type: string
+      description: Ordner relativ zu `/recordings`, Unterordner erlaubt, kein `..`
+      example: Twitch/Somestreamer
+
+    Stream:
+      type: object
+      required: [id, channel, output, quality, enabled]
+      properties:
+        id: { type: string }
+        channel: { type: string, pattern: "^[a-z0-9_]{1,25}$", description: Twitch-Login }
+        output: { $ref: "#/components/schemas/OutputPath" }
+        quality:
+          allOf: [{ $ref: "#/components/schemas/Quality" }]
+          description: Leer = Standardqualität aus den Einstellungen
+        enabled: { type: boolean }
+
+    StreamInput:
+      type: object
+      required: [channel]
+      properties:
+        channel: { type: string, description: "Login oder URL (`https://www.twitch.tv/name`)" }
+        output:
+          allOf: [{ $ref: "#/components/schemas/OutputPath" }]
+          description: Leer = Kanalname
+        quality: { $ref: "#/components/schemas/Quality" }
+        enabled: { type: boolean, default: true }
+
+    StreamPatch:
+      type: object
+      properties:
+        channel: { type: string }
+        output: { $ref: "#/components/schemas/OutputPath" }
+        quality: { $ref: "#/components/schemas/Quality" }
+        enabled: { type: boolean }
+
+    FolderLayout:
+      type: string
+      enum: [output_year_month, year_month, year, date, none]
+
+    Options:
+      type: object
+      description: Siehe docs/CONFIGURATION.md für Bedeutung und Umgebungsvariablen
+      properties:
+        check_interval: { type: integer, minimum: 10, maximum: 3600 }
+        default_quality: { $ref: "#/components/schemas/Quality" }
+        rescan_interval: { type: integer, minimum: 5, maximum: 600 }
+        rescan_duration: { type: integer, minimum: 0, maximum: 3600 }
+        folder_layout: { $ref: "#/components/schemas/FolderLayout" }
+        keep_source: { type: boolean }
+        done_retention_days: { type: integer, minimum: 0, maximum: 3650 }
+        audio_normalize: { type: boolean }
+        video_codec: { type: string, pattern: "^[A-Za-z0-9_-]{1,40}$", example: libx264 }
+        ffmpeg_args:
+          type: string
+          maxLength: 500
+          description: "Zusätzliche ffmpeg-Ausgabeoptionen. `-i`, `-progress`, `-y`, `-n`, `-stdin`, `-nostdin` sind nicht erlaubt"
+        vod_mode: { type: string, enum: [realtime, download] }
+        vod_speed: { type: number, minimum: 0.25, maximum: 20 }
+        vod_segment_threads: { type: integer, minimum: 1, maximum: 10 }
+        vod_parallel: { type: integer, minimum: 1, maximum: 5 }
+        max_parallel_streams: { type: integer, minimum: 0, maximum: 100, description: 0 = kein Limit }
+        slot_cooldown: { type: integer, minimum: 0, maximum: 3600 }
+
+    SettingsPatch:
+      type: object
+      additionalProperties: false
+      description: Felder wie in `Options`; `null` setzt auf den Standard zurück
+      properties:
+        check_interval: { type: [integer, string, "null"] }
+        default_quality: { type: [string, "null"] }
+        rescan_interval: { type: [integer, string, "null"] }
+        rescan_duration: { type: [integer, string, "null"] }
+        folder_layout: { type: [string, "null"] }
+        keep_source: { type: [boolean, string, "null"] }
+        done_retention_days: { type: [integer, string, "null"] }
+        audio_normalize: { type: [boolean, string, "null"] }
+        video_codec: { type: [string, "null"] }
+        ffmpeg_args: { type: [string, "null"] }
+        vod_mode: { type: [string, "null"] }
+        vod_speed: { type: [number, string, "null"] }
+        vod_segment_threads: { type: [integer, string, "null"] }
+        vod_parallel: { type: [integer, string, "null"] }
+        max_parallel_streams: { type: [integer, string, "null"] }
+        slot_cooldown: { type: [integer, string, "null"] }
+
+    SettingsResponse:
+      type: object
+      required: [settings, defaults, overrides, limits, folder_layouts]
+      properties:
+        settings: { $ref: "#/components/schemas/Options" }
+        defaults: { $ref: "#/components/schemas/Options" }
+        overrides:
+          type: object
+          description: Nur die im Webinterface gespeicherten Werte
+        limits:
+          type: object
+          description: "Grenzen der Zahlenwerte: `{name: [min, max]}`"
+          additionalProperties:
+            type: array
+            items: { type: number }
+            minItems: 2
+            maxItems: 2
+        folder_layouts:
+          type: array
+          items: { $ref: "#/components/schemas/FolderLayout" }
+
+    StreamState:
+      type: string
+      enum: [disabled, unknown, offline, live, starting, recording, finished, waiting, error, rescan]
+
+    LastRecording:
+      type: [object, "null"]
+      properties:
+        state: { type: string }
+        error: { type: [string, "null"] }
+        file: { type: string }
+        at: { type: string, format: date-time }
+
+    StreamStatus:
+      type: object
+      properties:
+        state: { $ref: "#/components/schemas/StreamState" }
+        live: { type: [boolean, "null"], description: null = letzte Twitch-Abfrage fehlgeschlagen }
+        category: { type: [string, "null"] }
+        title: { type: [string, "null"] }
+        file: { type: [string, "null"], description: Ziel der laufenden Aufnahme unter /recordings }
+        error: { type: [string, "null"] }
+        rescan_until: { type: [string, "null"], format: date-time }
+        cooldown_until: { type: [string, "null"], format: date-time }
+        last: { $ref: "#/components/schemas/LastRecording" }
+
+    DownloadStatus:
+      type: object
+      properties:
+        state: { type: string, enum: [starting, downloading, done, error, cancelled, stopped] }
+        title: { type: [string, "null"] }
+        channel: { type: [string, "null"] }
+        mode: { type: string, enum: [realtime, download] }
+        speed: { type: [number, "null"] }
+        progress: { type: [number, "null"], minimum: 0, maximum: 1 }
+        media_seconds: { type: integer, description: Bereits geladene Wiedergabezeit }
+        duration: { type: [integer, "null"], description: Länge des VODs in Sekunden }
+        bytes: { type: integer }
+        file: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        elapsed_seconds: { type: integer }
+
+    RecorderStatus:
+      type: object
+      properties:
+        updated_at: { type: string, format: date-time }
+        options: { $ref: "#/components/schemas/Options" }
+        check_interval: { type: integer }
+        next_check_in: { type: integer }
+        twitch_error: { type: [string, "null"], description: Nur der Fehlertyp, nie der Wortlaut }
+        config_error: { type: [string, "null"] }
+        streams:
+          type: object
+          description: Status je Stream-ID
+          additionalProperties: { $ref: "#/components/schemas/StreamStatus" }
+        downloads:
+          type: object
+          description: Laufende VOD-Downloads je Download-ID
+          additionalProperties: { $ref: "#/components/schemas/DownloadStatus" }
+        streams_active: { type: integer }
+        streams_cooldown: { type: integer }
+        streams_limit: { type: integer }
+        downloads_blocked: { type: boolean }
+
+    Claim:
+      type: [object, "null"]
+      properties:
+        converter: { type: string }
+        started: { type: number, description: Unix-Zeit }
+        heartbeat: { type: number, description: Unix-Zeit }
+        progress: { type: number, minimum: 0, maximum: 1 }
+
+    Job:
+      type: object
+      required: [id, size]
+      properties:
+        id: { type: string }
+        channel: { type: [string, "null"] }
+        title: { type: [string, "null"] }
+        destination: { type: [string, "null"], description: Ziel unter /recordings }
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        complete: { type: [boolean, "null"], description: false = Aufnahme unvollständig }
+        error: { type: [string, "null"] }
+        attempts: { type: [integer, "null"] }
+        size: { type: integer, description: Bytes }
+        claim: { $ref: "#/components/schemas/Claim" }
+
+    JobsByState:
+      type: object
+      required: [recording, queue, converting, failed]
+      properties:
+        recording: { type: array, items: { $ref: "#/components/schemas/Job" } }
+        queue: { type: array, items: { $ref: "#/components/schemas/Job" } }
+        converting: { type: array, items: { $ref: "#/components/schemas/Job" } }
+        failed: { type: array, items: { $ref: "#/components/schemas/Job" } }
+
+    Worker:
+      type: object
+      properties:
+        name: { type: string }
+        state: { type: string, enum: [idle, busy] }
+        job: { type: [string, "null"] }
+        progress: { type: [number, "null"] }
+        poll_seconds: { type: number }
+        heartbeat: { type: number }
+        started: { type: [number, "null"] }
+        online: { type: boolean }
+        last_seen_seconds: { type: integer }
+
+    DoneEntry:
+      type: object
+      properties:
+        id: { type: string }
+        channel: { type: [string, "null"] }
+        title: { type: [string, "null"] }
+        converted_to: { type: [string, "null"] }
+        done_ts: { type: number }
+        size: { type: integer }
+
+    Overview:
+      type: object
+      required: [counts, running, workers, recent, done, jobs]
+      properties:
+        counts:
+          type: object
+          properties:
+            open: { type: integer }
+            running: { type: integer }
+            recording: { type: integer }
+            failed: { type: integer }
+            completed: { type: integer }
+            workers_online: { type: integer }
+            workers_total: { type: integer }
+            done: { type: integer }
+            done_size: { type: integer }
+        running:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              channel: { type: [string, "null"] }
+              title: { type: [string, "null"] }
+              converter: { type: [string, "null"] }
+              progress: { type: number }
+              elapsed_seconds: { type: integer }
+              eta_seconds: { type: [integer, "null"] }
+        workers: { type: array, items: { $ref: "#/components/schemas/Worker" } }
+        recent:
+          type: array
+          description: Bis zu 5 zuletzt fertige Umwandlungen
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              finished: { type: number }
+              channel: { type: [string, "null"] }
+              title: { type: [string, "null"] }
+              file: { type: string }
+              converter: { type: string }
+              chapters: { type: integer }
+              duration: { type: number }
+              size: { type: integer }
+        done: { type: array, items: { $ref: "#/components/schemas/DoneEntry" } }
+        jobs: { $ref: "#/components/schemas/JobsByState" }
+
+    DownloadInput:
+      type: object
+      required: [url]
+      properties:
+        url: { type: string, description: "Twitch-VOD-URL oder Video-ID", example: "https://www.twitch.tv/videos/2345678901" }
+        output: { $ref: "#/components/schemas/OutputPath" }
+        quality: { $ref: "#/components/schemas/Quality" }
+        mode: { type: [string, "null"], enum: [realtime, download, null], description: null = Standard aus den Einstellungen }
+        speed: { type: [number, "null"], minimum: 0.25, maximum: 20 }
+
+    DownloadRequest:
+      type: object
+      required: [id, video_id, url]
+      properties:
+        id: { type: string }
+        video_id: { type: string }
+        url: { type: string }
+        output: { type: string }
+        quality: { type: string }
+        mode: { type: [string, "null"] }
+        speed: { type: [number, "null"] }
+        created: { type: number }
+        cancel: { type: boolean, description: Abbruch angefordert }
+        error: { type: string, description: Nur bei fehlgeschlagenen }
+        failed_at: { type: number }
+        status:
+          oneOf:
+            - $ref: "#/components/schemas/DownloadStatus"
+            - type: "null"
+
+    Downloads:
+      type: object
+      required: [pending, failed, limit]
+      properties:
+        pending: { type: array, items: { $ref: "#/components/schemas/DownloadRequest" } }
+        failed: { type: array, items: { $ref: "#/components/schemas/DownloadRequest" } }
+        limit:
+          type: object
+          properties:
+            active: { type: [integer, "null"], description: Belegte Twitch-Stream-Plätze }
+            max: { type: [integer, "null"], description: 0 = kein Limit }
+            cooldown: { type: integer, description: Davon reserviert nach Stream-Ende }
+            blocked: { type: boolean, description: Ein wartender Download wartet auf einen freien Platz }
