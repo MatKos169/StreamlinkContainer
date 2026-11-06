@@ -1,5 +1,4 @@
 """Safe file and folder names for recordings (sanitizers taken over from upstream)."""
-import os
 import re
 import unicodedata
 
@@ -45,10 +44,25 @@ def clean_output_path(path):
     return "/".join(parts)
 
 
-def recording_base(recordings_dir, output, title, now):
-    """Return "<recordings>/<output>/<YYYY-mm-dd>/<HH-MM-SS> - <title>" (no extension)."""
-    prefix = now.strftime("%H-%M-%S")
+# Folder layouts below/around the channel's output folder (choosable in the web UI).
+FOLDER_LAYOUTS = {
+    "output_year_month": "<output>-%Y/%m",   # like the MatKos169/ffmpeg container: name-2026/11/
+    "year_month": "<output>/%Y/%m",
+    "year": "<output>/%Y",
+    "date": "<output>/%Y-%m-%d",
+    "none": "<output>",
+}
+
+
+def destination_path(output, layout, started, title, ext="mp4"):
+    """Final path relative to /recordings, e.g. "<output>-2026/11/<YYYY-mm-dd HH-MM-SS> - <title>.mp4".
+
+    The date is always in the file name, so files sort well in Jellyfin
+    whatever the folder layout.
+    """
+    prefix = started.strftime("%Y-%m-%d %H-%M-%S")
     budget = NAME_MAX_BYTES - SUFFIX_RESERVE - len(prefix) - len(" - ")
     safe_title = truncate_utf8(sanitize_component(title), budget).strip(" .")
     filename = f"{prefix} - {safe_title}" if safe_title else prefix
-    return os.path.join(recordings_dir, clean_output_path(output), now.strftime("%Y-%m-%d"), filename)
+    folder = started.strftime(FOLDER_LAYOUTS[layout]).replace("<output>", clean_output_path(output))
+    return f"{clean_output_path(folder)}/{filename}.{ext}"

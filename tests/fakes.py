@@ -7,7 +7,8 @@ from app.twitch import LiveInfo
 
 def make_settings(tmp_path, **kw):
     kw.setdefault("defaults", Options(check_interval=60, rescan_interval=10, rescan_duration=120))
-    return Settings(config_dir=str(tmp_path / "config"), recordings_dir=str(tmp_path / "rec"), **kw)
+    return Settings(config_dir=str(tmp_path / "config"), recordings_dir=str(tmp_path / "rec"),
+                    work_dir=str(tmp_path / "work"), **kw)
 
 
 def save_streams(path, streams, settings=None):

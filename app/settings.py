@@ -55,6 +55,7 @@ def parse_networks(value):
 class Settings:
     config_dir: str = "/config"
     recordings_dir: str = "/recordings"
+    work_dir: str = "/work"
     # Defaults for the options that can be changed in the web UI.
     defaults: Options = field(default_factory=Options)
     client_id: str = None
@@ -80,6 +81,9 @@ def load_defaults():
             "default_quality": env("DEFAULT_QUALITY", "quality"),
             "rescan_interval": env("RESCAN_INTERVAL"),
             "rescan_duration": env("RESCAN_DURATION"),
+            "folder_layout": env("FOLDER_LAYOUT"),
+            "keep_source": env("KEEP_SOURCE"),
+            "audio_normalize": env("AUDIO_NORMALIZE"),
         })
     except ValueError as error:
         raise SettingsError(str(error)) from None
@@ -89,6 +93,7 @@ def load_settings(require_twitch=False):
     settings = Settings(
         config_dir=env("CONFIG_DIR", default="/config"),
         recordings_dir=env("RECORDINGS_DIR", default="/recordings"),
+        work_dir=env("WORK_DIR", default="/work"),
         defaults=load_defaults(),
         client_id=env("TWITCH_CLIENT_ID", "clientid"),
         client_secret=env("TWITCH_CLIENT_SECRET", "clientsecret"),

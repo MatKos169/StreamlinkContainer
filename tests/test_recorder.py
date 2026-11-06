@@ -23,8 +23,8 @@ class FakeTwitch:
 class FakeRecording:
     created = []
 
-    def __init__(self, stream, info, settings):
-        self.stream, self.info, self.settings = stream, info, settings
+    def __init__(self, stream, info, settings, options):
+        self.stream, self.info, self.settings, self.options = stream, info, settings, options
         self.updates, self.stopped, self.alive = [], False, False
         self.state, self.error, self.file = "starting", None, None
         FakeRecording.created.append(self)
@@ -194,6 +194,7 @@ def test_settings_from_ui_are_picked_up(tmp_path):
     twitch.live = {"alpha": info("alpha")}
     advance(sup, clock, 15)
     assert FakeRecording.created[0].stream.quality == "720p,best"
+    assert FakeRecording.created[0].options.check_interval == 15
 
 
 def test_removed_or_disabled_stream_stops_recording(tmp_path):

@@ -1,0 +1,27 @@
+# Extra converter on another host. WORK_PATH and RECORDINGS_PATH must point to the
+# same shares (e.g. NFS/SMB mounts) that the recorder host uses.
+#   WORK_PATH=/mnt/nas/streamlink-work RECORDINGS_PATH=/mnt/nas/twitch \
+#   CONVERTER_NAME=host2 docker compose -f docker-compose.converter.yml up -d
+services:
+  converter:
+    image: streamlink-converter:local
+    build:
+      context: .
+      target: converter
+    user: "${PUID:-1027}:${PGID:-100}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    env_file:
+      - default.env
+    environment:
+      CONVERTER_NAME: ${CONVERTER_NAME:-}
+    volumes:
+      - ${WORK_PATH:?set WORK_PATH}:/work
+      - ${RECORDINGS_PATH:?set RECORDINGS_PATH}:/recordings
+    stop_grace_period: 40s

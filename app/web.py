@@ -14,6 +14,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from . import jobs
+from .naming import FOLDER_LAYOUTS
 from .settings import SettingsError, load_settings
 from .streams import OPTION_LIMITS, StreamConfig, load_config, save_config
 
@@ -129,6 +131,7 @@ def _settings_response(app, config):
         "defaults": asdict(defaults),
         "overrides": config.settings,
         "limits": OPTION_LIMITS,
+        "folder_layouts": list(FOLDER_LAYOUTS),
     })
 
 
@@ -159,6 +162,34 @@ async def update_settings(request):
     return _settings_response(request.app, config)
 
 
+async def list_jobs(request):
+    return web.json_response(jobs.list_jobs(request.app[SETTINGS_KEY].work_dir))
+
+
+def _failed_job(request):
+    job_id = request.match_info["id"]
+    if not jobs.valid_job_id(job_id):
+        raise web.HTTPBadRequest(text="invalid job id")
+    work = request.app[SETTINGS_KEY].work_dir
+    if not os.path.isdir(jobs.job_dir(work, "failed", job_id)):
+        raise web.HTTPNotFound(text="no failed job with this id")
+    return work, job_id
+
+
+async def retry_job(request):
+    await _read_json(request)  # JSON only: blocks cross-site form posts
+    work, job_id = _failed_job(request)
+    if jobs.move(work, job_id, "failed", "queue") is None:
+        return _error(404, "no failed job with this id")
+    return web.json_response({"id": job_id, "state": "queue"})
+
+
+async def delete_job(request):
+    work, job_id = _failed_job(request)
+    jobs.remove(jobs.job_dir(work, "failed", job_id))
+    return web.Response(status=204)
+
+
 async def get_status(request):
     try:
         with open(request.app[SETTINGS_KEY].status_file, encoding="utf-8") as f:
@@ -181,6 +212,9 @@ def create_app(settings):
         web.get("/api/status", get_status),
         web.get("/api/settings", get_settings),
         web.put("/api/settings", update_settings),
+        web.get("/api/jobs", list_jobs),
+        web.post("/api/jobs/{id}/retry", retry_job),
+        web.delete("/api/jobs/{id}", delete_job),
     ])
     return app
 

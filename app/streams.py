@@ -6,7 +6,7 @@ import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 
-from .naming import clean_output_path
+from .naming import FOLDER_LAYOUTS, clean_output_path
 
 _LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
 _URL_RE = re.compile(r"^(?:https?://)?(?:www\.|m\.)?twitch\.tv/([^/?#]+)", re.IGNORECASE)
@@ -65,6 +65,9 @@ class Options:
     default_quality: str = "best"
     rescan_interval: int = 10
     rescan_duration: int = 120
+    folder_layout: str = "output_year_month"   # see naming.FOLDER_LAYOUTS
+    keep_source: bool = True            # keep the .ts in /work/done after converting
+    audio_normalize: bool = True        # loudnorm to -14 LUFS, audio re-encoded as AAC 192k
 
     def merged(self, overrides):
         """Return a copy with validated overrides applied (None values are ignored)."""
@@ -80,6 +83,11 @@ class Options:
                 value = str(value).strip() or "best"
                 if not _QUALITY_RE.match(value):
                     raise ValueError("default_quality may only list stream names like '1080p60,720p,best'")
+            elif key == "folder_layout":
+                if value not in FOLDER_LAYOUTS:
+                    raise ValueError(f"folder_layout must be one of {', '.join(FOLDER_LAYOUTS)}")
+            elif key in ("keep_source", "audio_normalize"):
+                value = _parse_bool(value, key)
             else:
                 if isinstance(value, bool):
                     raise ValueError(f"{key} must be a whole number")
@@ -92,6 +100,17 @@ class Options:
                     raise ValueError(f"{key} must be between {low} and {high} seconds")
             values[key] = value
         return Options(**values)
+
+
+def _parse_bool(value, key):
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{key} must be true or false")
 
 
 @dataclass
@@ -129,14 +148,20 @@ def save_config(path, config):
     write_json_atomic(path, {"settings": config.settings, "streams": [asdict(s) for s in config.streams]})
 
 
-def write_json_atomic(path, data):
+def write_json_atomic(path, data, create_dirs=True):
     directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
+    if create_dirs:
+        os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
+        # mkstemp creates 0600; use normal file permissions (umask applies) so other
+        # containers/hosts with a different uid can read the file.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
         os.replace(tmp, path)
     except BaseException:
         try:

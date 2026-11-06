@@ -3,17 +3,15 @@ import csv
 import datetime
 import logging
 import os
-import shutil
 import threading
 import time
 
-from .naming import recording_base
+from . import jobs
+from .naming import destination_path
 
 logger = logging.getLogger(__name__)
 
 READ_SIZE = 64 * 1024
-INCOMPLETE_SUFFIX = ".incomplete"
-CHAPTERS_SUFFIX = ".chapters.csv"
 CHAPTER_FIELDS = ["offset_seconds", "offset", "timestamp_utc", "category_id", "category", "title"]
 
 
@@ -90,12 +88,16 @@ def default_session_factory():
 
 
 class Recording(threading.Thread):
-    """Records one channel until the stream ends or stop() is called."""
+    """Records one channel into a job folder in /work until the stream ends or stop() is called.
 
-    def __init__(self, stream, info, settings, session_factory=default_session_factory, now=None):
+    When done, the folder is moved to /work/queue for a converter.
+    """
+
+    def __init__(self, stream, info, settings, options=None, session_factory=default_session_factory, now=None):
         super().__init__(daemon=True, name=f"rec-{stream.channel}")
         self.stream = stream
         self.settings = settings
+        self.options = options or settings.defaults
         self._session_factory = session_factory
         self._now = now or datetime.datetime.now
         self._stop_event = threading.Event()
@@ -104,7 +106,8 @@ class Recording(threading.Thread):
         self._chapters = None
         self.state = "starting"
         self.error = None
-        self.file = None
+        self.file = None      # destination below /recordings, set once recording started
+        self.job_id = None
 
     @property
     def info(self):
@@ -150,35 +153,53 @@ class Recording(threading.Thread):
         quality = select_quality(self.stream.quality, streams)
         selected = streams[quality]
 
-        base = recording_base(self.settings.recordings_dir, self.stream.output, self.info.title, self._now())
-        os.makedirs(os.path.dirname(base), exist_ok=True)
-        part = f"{base}.part"
-        final = f"{base}.{stream_extension(selected)}"
-        chapters_path = f"{base}{CHAPTERS_SUFFIX}"
+        started = self._now()
+        info = self.info
+        work = self.settings.work_dir
+        self.job_id = jobs.new_job_id(self.stream.channel, started)
+        path = jobs.job_dir(work, "recording", self.job_id)
+        os.makedirs(path)
+        destination = destination_path(self.stream.output, self.options.folder_layout, started, info.title)
+        jobs.write_job(path, {
+            "id": self.job_id, "channel": self.stream.channel, "title": info.title,
+            "category": info.category, "quality": quality, "destination": destination,
+            "keep_source": self.options.keep_source,
+            "audio_normalize": self.options.audio_normalize,
+            "started_at": started.astimezone().isoformat(timespec="seconds"),
+        })
+        part = os.path.join(path, f"video.{stream_extension(selected)}.part")
 
         fd = selected.open()
-        complete = False
+        failure = None
         try:
             with open(part, "wb") as out:
                 with self._lock:
-                    self._chapters = ChapterWriter(chapters_path)
+                    self._chapters = ChapterWriter(os.path.join(path, jobs.CHAPTERS_FILE))
                     self._chapters.add(self._info)
                 self.state = "recording"
-                self.file = os.path.relpath(final, self.settings.recordings_dir)
-                logger.info("%s: recording (%s) to %s", self.stream.channel, quality, self.file)
+                self.file = destination
+                logger.info("%s: recording (%s), job %s -> %s", self.stream.channel, quality, self.job_id, destination)
                 while not self._stop_event.is_set():
                     data = fd.read(READ_SIZE)
                     if not data:
                         break
                     out.write(data)
-            complete = True
+        except Exception as error:
+            failure = error
         finally:
             with self._lock:
                 if self._chapters is not None:
                     self._chapters.close()
             _close_quietly(fd)
-            _finalize(part, final, chapters_path, complete)
-        logger.info("%s: recording finished: %s", self.stream.channel, self.file)
+            queued = jobs.finish_recording(work, self.job_id, {
+                "ended_at": self._now().astimezone().isoformat(timespec="seconds"),
+                "complete": failure is None,
+                "error": describe_error(failure) if failure else None,
+            })
+        if failure is not None:
+            raise failure
+        logger.info("%s: recording finished, %s", self.stream.channel,
+                    f"queued for conversion ({self.job_id})" if queued else "nothing recorded")
 
 
 def _close_quietly(fd):
@@ -186,17 +207,3 @@ def _close_quietly(fd):
         fd.close()
     except Exception as error:
         logger.warning("Closing stream failed: %s", type(error).__name__)
-
-
-def _finalize(part, final, chapters_path, complete):
-    """Rename .part to the final name; keep partial data as .incomplete; drop empty files."""
-    if not os.path.exists(part):
-        return
-    if os.path.getsize(part) == 0:
-        os.remove(part)
-        if os.path.exists(chapters_path):
-            os.remove(chapters_path)
-    elif complete:
-        shutil.move(part, final)
-    else:
-        shutil.move(part, f"{final}{INCOMPLETE_SUFFIX}")

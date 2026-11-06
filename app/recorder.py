@@ -16,9 +16,10 @@ import logging
 import signal
 import sys
 import threading
-import time
 import os
+import time
 
+from . import jobs
 from .recording import Recording
 from .settings import SettingsError, load_settings
 from .streams import load_config, write_json_atomic
@@ -93,7 +94,7 @@ class Supervisor:
 
     def _start(self, stream, info, reason, quiet=False):
         resolved = dataclasses.replace(stream, quality=stream.quality or self.options.default_quality)
-        rec = self.recording_factory(resolved, info, self.settings)
+        rec = self.recording_factory(resolved, info, self.settings, self.options)
         self.recordings[stream.id] = rec
         rec.start()
         self._dirty = True
@@ -248,7 +249,10 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    logger.info("Recorder started, channels from %s", settings.streams_file)
+    jobs.ensure_dirs(settings.work_dir)
+    for job_id in jobs.recover_recordings(settings.work_dir):
+        logger.warning("Queued unfinished recording %s from before the restart", job_id)
+    logger.info("Recorder started, channels from %s, recording into %s", settings.streams_file, settings.work_dir)
     Supervisor(settings, TwitchClient(settings.client_id, settings.client_secret)).run(stop_event)
     logger.info("Recorder stopped")
 

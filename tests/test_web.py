@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -106,5 +107,39 @@ async def test_settings_api(settings):
         data = await (await client.put("/api/settings", json={"rescan_interval": None, "rescan_duration": None})).json()
         assert data["overrides"] == {}
         assert data["settings"] == data["defaults"]
+    finally:
+        await client.close()
+
+
+async def test_jobs_api(settings):
+    from app import jobs
+    os.makedirs(os.path.join(settings.work_dir, "failed", "j1"))
+    jobs.write_job(os.path.join(settings.work_dir, "failed", "j1"), {"channel": "a", "error": "ffmpeg exit code 1"})
+    os.makedirs(os.path.join(settings.work_dir, "failed", "j2"))
+    client = await client_for(settings)
+    try:
+        data = await (await client.get("/api/jobs")).json()
+        assert [j["id"] for j in data["failed"]] == ["j1", "j2"]
+        assert (await client.post("/api/jobs/j1/retry", data="",
+                                  headers={"Content-Type": "application/x-www-form-urlencoded"})).status == 415
+        assert (await client.post("/api/jobs/j1/retry", json={})).status == 200
+        assert os.path.isdir(os.path.join(settings.work_dir, "queue", "j1"))
+        assert (await client.post("/api/jobs/j1/retry", json={})).status == 404   # only failed jobs
+        assert (await client.delete("/api/jobs/j2")).status == 204
+        assert not os.path.exists(os.path.join(settings.work_dir, "failed", "j2"))
+        assert (await client.delete("/api/jobs/..")).status in (400, 404)
+    finally:
+        await client.close()
+
+
+async def test_settings_output_options(settings):
+    client = await client_for(settings)
+    try:
+        data = await (await client.put("/api/settings", json={"folder_layout": "year", "keep_source": False,
+                                                                 "audio_normalize": False})).json()
+        assert (data["settings"]["folder_layout"], data["settings"]["keep_source"], data["settings"]["audio_normalize"]) == (
+            "year", False, False)
+        assert "output_year_month" in data["folder_layouts"]
+        assert (await client.put("/api/settings", json={"folder_layout": "weird"})).status == 400
     finally:
         await client.close()

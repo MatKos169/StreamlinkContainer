@@ -8,6 +8,8 @@
   :root { color-scheme: light dark; --muted: #888; --ok: #2e9d4f; --rec: #d33; --warn: #c78a00; }
   body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 1100px; padding: 1.5rem; }
   h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  h2 { font-size: 1.1rem; margin: 2rem 0 0; }
+  progress { width: 8rem; }
   .muted { color: var(--muted); font-size: .9rem; }
   .banner { padding: .6rem .8rem; border-radius: 6px; margin: .75rem 0; background: #c78a0022; border: 1px solid var(--warn); }
   table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
@@ -50,7 +52,13 @@
   <button type="submit">Hinzufügen</button>
 </form>
 <div id="msg"></div>
-<p class="muted">Aufnahmen landen unter <code>&lt;Ausgabeordner&gt;/&lt;Datum&gt;/&lt;Uhrzeit&gt; - &lt;Titel&gt;.ts</code>, daneben eine <code>.chapters.csv</code> mit den Kategorie-Wechseln.</p>
+<p class="muted">Aufgenommen wird in einen Arbeitsordner. Danach wandelt ein Konverter die Aufnahme in eine MP4 mit Kapiteln (Kategorien) um und legt sie unter <code>&lt;Ausgabeordner&gt;<span id="layout-hint">/…</span>&lt;Datum Uhrzeit&gt; - &lt;Titel&gt;.mp4</code> ab.</p>
+
+<h2>Verarbeitung</h2>
+<table>
+  <thead><tr><th>Status</th><th>Kanal / Titel</th><th>Ziel</th><th>Größe</th><th></th></tr></thead>
+  <tbody id="jobs"><tr><td colspan="5" class="muted">Lade …</td></tr></tbody>
+</table>
 
 <details id="settings-panel">
   <summary>Einstellungen</summary>
@@ -63,6 +71,19 @@
     <span class="small">Nach dem Ende eines Streams wird der Kanal so oft direkt geprüft, damit ein Neustart nach einer Unterbrechung schnell erkannt wird.</span>
     <label for="rescan_duration">Nachprüfung für (s)</label><input type="number" id="rescan_duration" required>
     <span class="small">Wie lange nach Stream-Ende schneller geprüft wird. 0 schaltet die Nachprüfung ab.</span>
+    <label for="folder_layout">Unterordner</label>
+    <select id="folder_layout">
+      <option value="output_year_month">Ordner-Jahr/Monat (name-2026/11/)</option>
+      <option value="year_month">Ordner/Jahr/Monat (name/2026/11/)</option>
+      <option value="year">Ordner/Jahr (name/2026/)</option>
+      <option value="date">Ordner/Datum (name/2026-11-06/)</option>
+      <option value="none">keine Unterordner (name/)</option>
+    </select>
+    <span class="small">Ordner unterhalb des Ausgabeordners, z.B. für eine übersichtliche Jellyfin-Bibliothek. Gilt für neue Aufnahmen.</span>
+    <label for="keep_source">Original behalten</label><input type="checkbox" id="keep_source" style="width:auto">
+    <span class="small">Die aufgenommene .ts-Datei nach der Umwandlung im Arbeitsordner (<code>done/</code>) aufheben statt löschen.</span>
+    <label for="audio_normalize">Lautstärke normalisieren</label><input type="checkbox" id="audio_normalize" style="width:auto">
+    <span class="small">loudnorm auf -14 LUFS, Audio als AAC 192k (Video wird nur kopiert). Aus: Audio wird unverändert übernommen.</span>
     <div class="actions"><button type="submit">Speichern</button><button type="button" id="settings-reset">Auf Standard (Umgebungsvariablen) zurücksetzen</button></div>
   </form>
   <div id="smsg"></div>
@@ -158,15 +179,60 @@ document.getElementById("add").addEventListener("submit", async (ev) => {
   try { await api("POST", "/api/streams", body); ev.target.reset(); showError(); await load(); } catch (e) { showError(e); }
 });
 
-const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration"];
+const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "audio_normalize"];
+const LAYOUT_HINT = { none: "/", year: "/&lt;Jahr&gt;/", year_month: "/&lt;Jahr&gt;/&lt;Monat&gt;/", date: "/&lt;Datum&gt;/", output_year_month: "-&lt;Jahr&gt;/&lt;Monat&gt;/" };
 
 function fillSettings(data) {
   for (const f of OPTION_FIELDS) {
     const input = document.getElementById(f);
-    input.value = data.settings[f];
+    if (input.type === "checkbox") input.checked = data.settings[f]; else input.value = data.settings[f];
     input.title = `Standard: ${data.defaults[f]}`;
     if (data.limits[f]) { input.min = data.limits[f][0]; input.max = data.limits[f][1]; }
   }
+  document.getElementById("layout-hint").innerHTML = LAYOUT_HINT[data.settings.folder_layout] ?? "";
+}
+
+const JOB_STATES = { recording: "nimmt auf", queue: "wartet auf Konverter", converting: "wird umgewandelt", failed: "fehlgeschlagen" };
+
+function formatSize(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+
+function renderJobs(data) {
+  const body = document.getElementById("jobs");
+  body.replaceChildren();
+  const rows = [];
+  for (const state of ["recording", "converting", "queue", "failed"]) for (const job of data[state] || []) rows.push([state, job]);
+  if (!rows.length) { body.append(el("tr", {}, el("td", { colSpan: 5, class: "muted" }, "Keine laufenden oder wartenden Aufnahmen."))); return; }
+  for (const [state, job] of rows) {
+    const stateCell = el("td", {}, el("div", { class: `state ${state === "failed" ? "error" : state === "recording" ? "recording" : "waiting"}` }, JOB_STATES[state]));
+    if (state === "converting" && job.claim) {
+      stateCell.append(el("progress", { max: 1, value: job.claim.progress || 0 }));
+      stateCell.append(el("div", { class: "small" }, `${Math.round((job.claim.progress || 0) * 100)} % auf ${job.claim.converter}`));
+    }
+    if (job.complete === false && state !== "recording") stateCell.append(el("div", { class: "small" }, "Aufnahme unvollständig"));
+    if (state === "failed" && job.error) stateCell.append(el("div", { class: "small" }, job.error));
+    const actions = el("td", {});
+    if (state === "failed") {
+      actions.append(el("button", { onclick: async () => { try { await api("POST", `/api/jobs/${job.id}/retry`, {}); loadJobs(); } catch (e) { showError(e); } } }, "Erneut versuchen"), " ",
+        el("button", { onclick: async () => {
+          if (!confirm(`Aufnahme ${job.id} endgültig löschen?`)) return;
+          try { await api("DELETE", `/api/jobs/${job.id}`); loadJobs(); } catch (e) { showError(e); }
+        } }, "Löschen"));
+    }
+    body.append(el("tr", {}, stateCell,
+      el("td", {}, el("div", {}, job.channel || job.id), el("div", { class: "small" }, job.title || "")),
+      el("td", { class: "small" }, job.destination || ""),
+      el("td", { class: "small" }, formatSize(job.size || 0)),
+      actions));
+  }
+}
+
+async function loadJobs() {
+  try { renderJobs(await api("GET", "/api/jobs")); } catch (e) { showError(e); }
 }
 
 async function loadSettings() {
@@ -183,8 +249,8 @@ document.getElementById("settings").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const body = {};
   for (const f of OPTION_FIELDS) {
-    const v = document.getElementById(f).value;
-    body[f] = f === "default_quality" ? v : Number(v);
+    const input = document.getElementById(f);
+    body[f] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
   }
   saveSettings(body, "Gespeichert – der Recorder übernimmt die Werte innerhalb einer Sekunde.");
 });
@@ -194,7 +260,11 @@ document.getElementById("settings-reset").addEventListener("click", () =>
 
 loadSettings();
 load();
-setInterval(() => { if (!document.activeElement || document.activeElement.tagName !== "INPUT" || document.activeElement.type === "checkbox") load(); }, 5000);
+loadJobs();
+setInterval(() => {
+  loadJobs();
+  if (!document.activeElement || document.activeElement.tagName !== "INPUT" || document.activeElement.type === "checkbox") load();
+}, 5000);
 </script>
 </body>
 </html>
