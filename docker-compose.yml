@@ -28,7 +28,7 @@ services:
     stop_grace_period: 1m
     healthcheck:
       # status.json is rewritten on every check; stale means the loop is stuck.
-      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(time.time()-os.path.getmtime('/config/status.json') > 600)"]
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(time.time()-os.path.getmtime('/config/status.json') > 120)"]
       interval: 1m
       start_period: 2m
     deploy:

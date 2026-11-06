@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.streams import StreamConfig, load_streams, parse_channel, save_streams
+from app.streams import Config, Options, StreamConfig, load_config, parse_channel, save_config
 
 
 @pytest.mark.parametrize("value", [
@@ -40,20 +40,42 @@ def test_roundtrip(tmp_path):
     path = tmp_path / "cfg" / "streams.json"
     streams = [StreamConfig.from_input({"channel": "a", "output": "x/y", "quality": "720p,best"}),
                StreamConfig.from_input({"channel": "b", "enabled": False})]
-    save_streams(str(path), streams)
-    assert load_streams(str(path)) == streams
+    save_config(str(path), Config(settings={"rescan_interval": 5}, streams=streams))
+    loaded = load_config(str(path))
+    assert loaded.streams == streams
+    assert loaded.options(Options()).rescan_interval == 5
+    assert loaded.options(Options()).check_interval == 60
     assert [p.name for p in path.parent.iterdir()] == ["streams.json"]  # no temp files left
 
 
 def test_missing_file_is_empty(tmp_path):
-    assert load_streams(str(tmp_path / "nope.json")) == []
+    assert load_config(str(tmp_path / "nope.json")) == Config()
 
 
 def test_invalid_file_raises(tmp_path):
     path = tmp_path / "streams.json"
     path.write_text("{broken")
     with pytest.raises(ValueError):
-        load_streams(str(path))
+        load_config(str(path))
     path.write_text(json.dumps({"streams": [{"channel": "a", "output": "../x"}]}))
     with pytest.raises(ValueError):
-        load_streams(str(path))
+        load_config(str(path))
+    path.write_text(json.dumps({"settings": {"rescan_interval": 1}, "streams": []}))
+    with pytest.raises(ValueError):
+        load_config(str(path))
+
+
+def test_options_merged_validates_and_converts():
+    base = Options()
+    merged = base.merged({"check_interval": "30", "rescan_duration": 0, "default_quality": " 720p,best ", "rescan_interval": None})
+    assert (merged.check_interval, merged.rescan_duration, merged.default_quality, merged.rescan_interval) == (30, 0, "720p,best", 10)
+    assert base.check_interval == 60  # unchanged
+
+
+@pytest.mark.parametrize("bad", [
+    {"check_interval": 5}, {"rescan_interval": 4}, {"rescan_duration": 3601},
+    {"rescan_interval": "x"}, {"rescan_interval": True}, {"default_quality": "a;b"}, {"nope": 1},
+])
+def test_options_merged_rejects(bad):
+    with pytest.raises(ValueError):
+        Options().merged(bad)

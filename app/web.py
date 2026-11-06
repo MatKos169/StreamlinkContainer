@@ -15,7 +15,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .settings import SettingsError, load_settings
-from .streams import StreamConfig, load_streams, save_streams
+from .streams import OPTION_LIMITS, StreamConfig, load_config, save_config
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,8 @@ async def _read_json(request):
         raise web.HTTPBadRequest(text="invalid JSON") from None
 
 
-def _load(app):
-    return load_streams(app[SETTINGS_KEY].streams_file)
+def _path(app):
+    return app[SETTINGS_KEY].streams_file
 
 
 def _duplicate(streams, candidate):
@@ -70,24 +70,24 @@ async def index(request):
 
 async def list_streams(request):
     try:
-        streams = _load(request.app)
+        config = load_config(_path(request.app))
     except ValueError as error:
         return _error(500, str(error))
-    return web.json_response({"streams": [asdict(s) for s in streams]})
+    return web.json_response({"streams": [asdict(s) for s in config.streams]})
 
 
 async def create_stream(request):
     data = await _read_json(request)
     with request.app[LOCK_KEY]:
-        streams = _load(request.app)
+        config = load_config(_path(request.app))
         try:
             stream = StreamConfig.from_input({**data, "id": None})
         except ValueError as error:
             return _error(400, str(error))
-        if _duplicate(streams, stream):
+        if _duplicate(config.streams, stream):
             return _error(409, f"channel {stream.channel} is already configured")
-        streams.append(stream)
-        save_streams(request.app[SETTINGS_KEY].streams_file, streams)
+        config.streams.append(stream)
+        save_config(_path(request.app), config)
     return web.json_response(asdict(stream), status=201)
 
 
@@ -95,30 +95,68 @@ async def update_stream(request):
     sid = request.match_info["id"]
     data = await _read_json(request)
     with request.app[LOCK_KEY]:
-        streams = _load(request.app)
-        index_ = next((i for i, s in enumerate(streams) if s.id == sid), None)
+        config = load_config(_path(request.app))
+        index_ = next((i for i, s in enumerate(config.streams) if s.id == sid), None)
         if index_ is None:
             return _error(404, "unknown stream")
         try:
-            stream = StreamConfig.from_input({**asdict(streams[index_]), **data}, stream_id=sid)
+            stream = StreamConfig.from_input({**asdict(config.streams[index_]), **data}, stream_id=sid)
         except ValueError as error:
             return _error(400, str(error))
-        if _duplicate(streams, stream):
+        if _duplicate(config.streams, stream):
             return _error(409, f"channel {stream.channel} is already configured")
-        streams[index_] = stream
-        save_streams(request.app[SETTINGS_KEY].streams_file, streams)
+        config.streams[index_] = stream
+        save_config(_path(request.app), config)
     return web.json_response(asdict(stream))
 
 
 async def delete_stream(request):
     sid = request.match_info["id"]
     with request.app[LOCK_KEY]:
-        streams = _load(request.app)
-        remaining = [s for s in streams if s.id != sid]
-        if len(remaining) == len(streams):
+        config = load_config(_path(request.app))
+        remaining = [s for s in config.streams if s.id != sid]
+        if len(remaining) == len(config.streams):
             return _error(404, "unknown stream")
-        save_streams(request.app[SETTINGS_KEY].streams_file, remaining)
+        config.streams = remaining
+        save_config(_path(request.app), config)
     return web.Response(status=204)
+
+
+def _settings_response(app, config):
+    defaults = app[SETTINGS_KEY].defaults
+    return web.json_response({
+        "settings": asdict(config.options(defaults)),
+        "defaults": asdict(defaults),
+        "overrides": config.settings,
+        "limits": OPTION_LIMITS,
+    })
+
+
+async def get_settings(request):
+    try:
+        config = load_config(_path(request.app))
+    except ValueError as error:
+        return _error(500, str(error))
+    return _settings_response(request.app, config)
+
+
+async def update_settings(request):
+    """Body: {name: value} to override, {name: null} to go back to the env default."""
+    data = await _read_json(request)
+    if not isinstance(data, dict):
+        return _error(400, "settings must be an object")
+    with request.app[LOCK_KEY]:
+        config = load_config(_path(request.app))
+        overrides = {**config.settings, **data}
+        overrides = {k: v for k, v in overrides.items() if v is not None}
+        try:
+            # Normalized values (e.g. "30" -> 30) are what gets stored.
+            merged = request.app[SETTINGS_KEY].defaults.merged(overrides)
+        except ValueError as error:
+            return _error(400, str(error))
+        config.settings = {k: getattr(merged, k) for k in overrides}
+        save_config(_path(request.app), config)
+    return _settings_response(request.app, config)
 
 
 async def get_status(request):
@@ -141,6 +179,8 @@ def create_app(settings):
         web.put("/api/streams/{id}", update_stream),
         web.delete("/api/streams/{id}", delete_stream),
         web.get("/api/status", get_status),
+        web.get("/api/settings", get_settings),
+        web.put("/api/settings", update_settings),
     ])
     return app
 

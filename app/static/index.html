@@ -24,7 +24,13 @@
   .state.error, .state.waiting { color: var(--warn); }
   .state.offline, .state.disabled, .state.unknown { color: var(--muted); }
   .small { font-size: .8rem; color: var(--muted); word-break: break-all; }
-  #msg { color: var(--rec); min-height: 1.2rem; margin-top: .5rem; }
+  #msg, #smsg { color: var(--rec); min-height: 1.2rem; margin-top: .5rem; }
+  .state.rescan { color: var(--warn); }
+  details { margin-top: 2rem; border: 1px solid #8884; border-radius: 6px; padding: .6rem .9rem; }
+  summary { cursor: pointer; font-weight: 600; }
+  form.settings { display: grid; grid-template-columns: max-content 10rem 1fr; gap: .5rem .8rem; align-items: center; margin-top: .8rem; }
+  form.settings input { padding: .3rem; width: 100%; box-sizing: border-box; }
+  form.settings .actions { grid-column: 1 / -1; display: flex; gap: .5rem; }
 </style>
 </head>
 <body>
@@ -46,9 +52,25 @@
 <div id="msg"></div>
 <p class="muted">Aufnahmen landen unter <code>&lt;Ausgabeordner&gt;/&lt;Datum&gt;/&lt;Uhrzeit&gt; - &lt;Titel&gt;.ts</code>, daneben eine <code>.chapters.csv</code> mit den Kategorie-Wechseln.</p>
 
+<details id="settings-panel">
+  <summary>Einstellungen</summary>
+  <form class="settings" id="settings">
+    <label for="check_interval">Prüfintervall (s)</label><input type="number" id="check_interval" required>
+    <span class="small">Wie oft alle Kanäle bei Twitch geprüft werden.</span>
+    <label for="default_quality">Standardqualität</label><input type="text" id="default_quality" required>
+    <span class="small">Für Kanäle ohne eigene Qualität, z.B. <code>1080p60,720p60,best</code>.</span>
+    <label for="rescan_interval">Nachprüfung alle (s)</label><input type="number" id="rescan_interval" required>
+    <span class="small">Nach dem Ende eines Streams wird der Kanal so oft direkt geprüft, damit ein Neustart nach einer Unterbrechung schnell erkannt wird.</span>
+    <label for="rescan_duration">Nachprüfung für (s)</label><input type="number" id="rescan_duration" required>
+    <span class="small">Wie lange nach Stream-Ende schneller geprüft wird. 0 schaltet die Nachprüfung ab.</span>
+    <div class="actions"><button type="submit">Speichern</button><button type="button" id="settings-reset">Auf Standard (Umgebungsvariablen) zurücksetzen</button></div>
+  </form>
+  <div id="smsg"></div>
+</details>
+
 <script>
 const STATES = { recording: "nimmt auf", live: "live", offline: "offline", waiting: "wartet auf Stream",
-  starting: "startet", error: "Fehler", disabled: "deaktiviert", unknown: "unbekannt", finished: "fertig" };
+  starting: "startet", rescan: "Nachprüfung", error: "Fehler", disabled: "deaktiviert", unknown: "unbekannt", finished: "fertig" };
 let streams = [], status = null;
 
 async function api(method, path, body) {
@@ -86,6 +108,7 @@ function statusCell(stream) {
   const s = status && status.streams ? status.streams[stream.id] : null;
   if (!s) return el("td", { class: "small" }, "noch nicht geprüft");
   const cell = el("td", {}, el("div", { class: `state ${s.state}` }, STATES[s.state] || s.state));
+  if (s.state === "rescan" && s.rescan_until) cell.append(el("div", { class: "small" }, `Stream beendet – prüfe schnell bis ${new Date(s.rescan_until).toLocaleTimeString()}`));
   if (s.category) cell.append(el("div", { class: "small" }, `${s.category} – ${s.title || ""}`));
   if (s.file) cell.append(el("div", { class: "small" }, s.file));
   if (s.error) cell.append(el("div", { class: "small" }, s.error));
@@ -115,8 +138,8 @@ function render() {
   banners.replaceChildren();
   if (!status) { info.textContent = "Recorder hat noch keinen Status geschrieben (läuft der Recorder-Container?)."; return; }
   const age = (Date.now() - Date.parse(status.updated_at)) / 1000;
-  const stale = age > status.check_interval * 3 + 30;
-  info.textContent = `Recorder zuletzt aktiv: ${new Date(status.updated_at).toLocaleString()} · Prüfintervall ${status.check_interval}s` + (stale ? " · RECORDER REAGIERT NICHT" : "");
+  const stale = age > 90;  // the recorder rewrites status.json at least every 30s
+  info.textContent = `Recorder zuletzt aktiv: ${new Date(status.updated_at).toLocaleString()} · Prüfintervall ${status.check_interval}s · nächste Prüfung in ${status.next_check_in ?? "?"}s` + (stale ? " · RECORDER REAGIERT NICHT" : "");
   if (status.twitch_error) banners.append(el("div", { class: "banner" }, `Twitch-Abfrage fehlgeschlagen: ${status.twitch_error}`));
   if (status.config_error) banners.append(el("div", { class: "banner" }, `streams.json ungültig: ${status.config_error}`));
 }
@@ -135,6 +158,41 @@ document.getElementById("add").addEventListener("submit", async (ev) => {
   try { await api("POST", "/api/streams", body); ev.target.reset(); showError(); await load(); } catch (e) { showError(e); }
 });
 
+const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration"];
+
+function fillSettings(data) {
+  for (const f of OPTION_FIELDS) {
+    const input = document.getElementById(f);
+    input.value = data.settings[f];
+    input.title = `Standard: ${data.defaults[f]}`;
+    if (data.limits[f]) { input.min = data.limits[f][0]; input.max = data.limits[f][1]; }
+  }
+}
+
+async function loadSettings() {
+  try { fillSettings(await api("GET", "/api/settings")); } catch (e) { document.getElementById("smsg").textContent = e.message; }
+}
+
+async function saveSettings(body, okText) {
+  const msg = document.getElementById("smsg");
+  try { fillSettings(await api("PUT", "/api/settings", body)); msg.style.color = "var(--ok)"; msg.textContent = okText; }
+  catch (e) { msg.style.color = ""; msg.textContent = e.message; }
+}
+
+document.getElementById("settings").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const body = {};
+  for (const f of OPTION_FIELDS) {
+    const v = document.getElementById(f).value;
+    body[f] = f === "default_quality" ? v : Number(v);
+  }
+  saveSettings(body, "Gespeichert – der Recorder übernimmt die Werte innerhalb einer Sekunde.");
+});
+
+document.getElementById("settings-reset").addEventListener("click", () =>
+  saveSettings(Object.fromEntries(OPTION_FIELDS.map((f) => [f, null])), "Auf Standardwerte zurückgesetzt."));
+
+loadSettings();
 load();
 setInterval(() => { if (!document.activeElement || document.activeElement.tagName !== "INPUT" || document.activeElement.type === "checkbox") load(); }, 5000);
 </script>

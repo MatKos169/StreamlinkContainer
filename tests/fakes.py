@@ -1,12 +1,17 @@
 import threading
 
 from app.settings import Settings
-from app.streams import StreamConfig
+from app.streams import Config, Options, StreamConfig, save_config
 from app.twitch import LiveInfo
 
 
 def make_settings(tmp_path, **kw):
-    return Settings(config_dir=str(tmp_path / "config"), recordings_dir=str(tmp_path / "rec"), check_interval=10, **kw)
+    kw.setdefault("defaults", Options(check_interval=60, rescan_interval=10, rescan_duration=120))
+    return Settings(config_dir=str(tmp_path / "config"), recordings_dir=str(tmp_path / "rec"), **kw)
+
+
+def save_streams(path, streams, settings=None):
+    save_config(path, Config(settings=settings or {}, streams=streams))
 
 
 def make_stream(channel="streamer", output=None, **kw):

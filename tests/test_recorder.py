@@ -2,9 +2,9 @@ import json
 import os
 
 from app.recorder import Supervisor
-from app.streams import save_streams
+from app.streams import Options
 
-from fakes import info, make_settings, make_stream
+from fakes import info, make_settings, make_stream, save_streams
 
 
 class FakeTwitch:
@@ -26,7 +26,7 @@ class FakeRecording:
     def __init__(self, stream, info, settings):
         self.stream, self.info, self.settings = stream, info, settings
         self.updates, self.stopped, self.alive = [], False, False
-        self.state, self.error, self.file = "recording", None, "x.ts"
+        self.state, self.error, self.file = "starting", None, None
         FakeRecording.created.append(self)
 
     def start(self):
@@ -44,73 +44,183 @@ class FakeRecording:
     def join(self, timeout=None):
         pass
 
+    # test helpers
+    def record(self):
+        self.state, self.file = "recording", f"{self.stream.output}/x.ts"
 
-def setup(tmp_path, streams):
+    def end(self, state="finished"):
+        self.state, self.alive = state, False
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def setup(tmp_path, streams, overrides=None, **settings_kw):
     FakeRecording.created = []
-    settings = make_settings(tmp_path)
-    save_streams(settings.streams_file, streams)
-    twitch = FakeTwitch()
-    return Supervisor(settings, twitch, recording_factory=FakeRecording), twitch, settings
+    settings = make_settings(tmp_path, **settings_kw)
+    save_streams(settings.streams_file, streams, overrides)
+    twitch, clock = FakeTwitch(), Clock()
+    sup = Supervisor(settings, twitch, recording_factory=FakeRecording, clock=clock, wallclock=lambda: 1_800_000_000 + clock.t)
+    return sup, twitch, settings, clock
 
 
 def status(settings):
     return json.load(open(settings.status_file))
 
 
+def advance(sup, clock, seconds):
+    """Run one step per second, like the real loop."""
+    for _ in range(seconds):
+        clock.t += 1
+        sup.step()
+
+
+def touch(path):
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+
 def test_starts_recording_when_live_and_updates_category(tmp_path):
     a, b = make_stream("alpha"), make_stream("beta", output="other/beta")
-    sup, twitch, settings = setup(tmp_path, [a, b])
-    sup.tick()
+    sup, twitch, settings, clock = setup(tmp_path, [a, b])
+    sup.step()
     assert FakeRecording.created == []
     assert twitch.calls == [["alpha", "beta"]]
     assert status(settings)["streams"][a.id]["state"] == "offline"
 
     twitch.live = {"beta": info("beta")}
-    sup.tick()
-    assert [r.stream.channel for r in FakeRecording.created] == ["beta"]
-    assert FakeRecording.created[0].stream.output == "other/beta"
+    advance(sup, clock, 59)
+    assert len(twitch.calls) == 1 and FakeRecording.created == []  # checks only every check_interval
+    advance(sup, clock, 1)
+    assert len(twitch.calls) == 2
+    rec = FakeRecording.created[0]
+    assert (rec.stream.channel, rec.stream.output, rec.stream.quality) == ("beta", "other/beta", "best")
+    rec.record()
+    sup.step()
     assert status(settings)["streams"][b.id]["state"] == "recording"
 
     twitch.live = {"beta": info("beta", category="Elden Ring", category_id="1")}
-    sup.tick()
+    advance(sup, clock, 60)
     assert len(FakeRecording.created) == 1
-    assert FakeRecording.created[0].updates[-1].category == "Elden Ring"
+    assert rec.updates[-1].category == "Elden Ring"
 
 
-def test_finished_recording_restarts_if_still_live(tmp_path):
+def test_quick_rescan_after_stream_end_finds_restart(tmp_path):
     a = make_stream("alpha")
-    sup, twitch, settings = setup(tmp_path, [a])
+    sup, twitch, settings, clock = setup(tmp_path, [a])
+    twitch.live = {"alpha": info("alpha", category="Music")}
+    sup.step()
+    first = FakeRecording.created[0]
+    first.record()
+    advance(sup, clock, 5)
+
+    twitch.live = {}            # stream dropped; Helix says offline from now on
+    first.end()
+    advance(sup, clock, 1)
+    st = status(settings)["streams"][a.id]
+    assert st["state"] == "rescan" and st["rescan_until"]
+    assert st["last"]["file"] == "alpha/x.ts"
+
+    advance(sup, clock, 9)
+    assert len(FakeRecording.created) == 1
+    advance(sup, clock, 1)      # 10s after the end: first direct probe
+    probe = FakeRecording.created[1]
+    assert probe.info.category == "Music"     # last known category for the chapters CSV
+    probe.end("waiting")        # still offline
+    advance(sup, clock, 10)
+    assert len(FakeRecording.created) == 3
+    FakeRecording.created[2].record()        # back online
+    advance(sup, clock, 1)
+    assert status(settings)["streams"][a.id]["state"] == "recording"
+    assert twitch.calls == [["alpha"]]       # restart was found without waiting for a Helix check
+
+
+def test_rescan_window_expires(tmp_path):
+    a = make_stream("alpha")
+    sup, twitch, settings, clock = setup(tmp_path, [a], overrides={"rescan_interval": 20, "rescan_duration": 60})
     twitch.live = {"alpha": info("alpha")}
-    sup.tick()
-    FakeRecording.created[0].alive = False
-    FakeRecording.created[0].state = "waiting"
-    sup.tick()
-    assert len(FakeRecording.created) == 2
-    assert status(settings)["streams"][a.id]["last"]["state"] == "waiting"
+    sup.step()
+    FakeRecording.created[0].record()
+    twitch.live = {}
+    FakeRecording.created[0].end()
+    for _ in range(80):
+        advance(sup, clock, 1)
+        for rec in FakeRecording.created[1:]:
+            if rec.alive:
+                rec.end("waiting")   # every probe finds nothing
+    assert len(FakeRecording.created) == 1 + 2   # probes at +20 and +40; the window closes at +60
+    assert a.id not in sup.rescan
+    assert status(settings)["streams"][a.id]["state"] == "offline"
+    assert status(settings)["streams"][a.id]["last"]["file"] == "alpha/x.ts"
+
+
+def test_failed_probe_does_not_extend_window_or_trigger_rescan(tmp_path):
+    a = make_stream("alpha")
+    sup, twitch, settings, clock = setup(tmp_path, [a])
+    twitch.live = {"alpha": info("alpha")}   # Helix says live but streamlink finds nothing
+    sup.step()
+    FakeRecording.created[0].end("waiting")
+    advance(sup, clock, 30)
+    assert sup.rescan == {}
+    assert len(FakeRecording.created) == 1   # next try only on the next regular check
+
+
+def test_rescan_disabled(tmp_path):
+    a = make_stream("alpha")
+    sup, twitch, settings, clock = setup(tmp_path, [a], overrides={"rescan_duration": 0})
+    twitch.live = {"alpha": info("alpha")}
+    sup.step()
+    FakeRecording.created[0].record()
+    twitch.live = {}
+    FakeRecording.created[0].end()
+    advance(sup, clock, 30)
+    assert sup.rescan == {} and len(FakeRecording.created) == 1
+
+
+def test_settings_from_ui_are_picked_up(tmp_path):
+    a = make_stream("alpha")
+    sup, twitch, settings, clock = setup(tmp_path, [a])
+    sup.step()
+    save_streams(settings.streams_file, [a], {"check_interval": 15, "default_quality": "720p,best"})
+    touch(settings.streams_file)
+    advance(sup, clock, 16)
+    assert len(twitch.calls) == 2
+    assert status(settings)["options"]["check_interval"] == 15
+    twitch.live = {"alpha": info("alpha")}
+    advance(sup, clock, 15)
+    assert FakeRecording.created[0].stream.quality == "720p,best"
 
 
 def test_removed_or_disabled_stream_stops_recording(tmp_path):
     a, b = make_stream("alpha"), make_stream("beta")
-    sup, twitch, settings = setup(tmp_path, [a, b])
+    sup, twitch, settings, clock = setup(tmp_path, [a, b])
     twitch.live = {"alpha": info("alpha"), "beta": info("beta")}
-    sup.tick()
+    sup.step()
     rec_a, rec_b = FakeRecording.created
+    rec_a.record(), rec_b.record()
     b.enabled = False
     save_streams(settings.streams_file, [b])
-    os.utime(settings.streams_file, ns=(1, 1))  # make sure the mtime changes
-    sup.tick()
+    touch(settings.streams_file)
+    sup.step()
     assert rec_a.stopped and rec_b.stopped
-    assert len(twitch.calls) == 1  # no enabled channel left, so no API call
+    rec_a.end(), rec_b.end()
+    advance(sup, clock, 30)
+    assert sup.rescan == {}                  # no quick re-check for removed/disabled channels
     assert status(settings)["streams"][b.id]["state"] == "disabled"
 
 
 def test_twitch_error_keeps_running_recordings(tmp_path):
     a = make_stream("alpha")
-    sup, twitch, settings = setup(tmp_path, [a])
+    sup, twitch, settings, clock = setup(tmp_path, [a])
     twitch.live = {"alpha": info("alpha")}
-    sup.tick()
+    sup.step()
     twitch.fail = RuntimeError("https://id.twitch.tv/?client_secret=SECRET")
-    sup.tick()
+    advance(sup, clock, 60)
     assert not FakeRecording.created[0].stopped
     st = status(settings)
     assert st["twitch_error"] == "RuntimeError"
@@ -119,21 +229,33 @@ def test_twitch_error_keeps_running_recordings(tmp_path):
 
 def test_invalid_config_keeps_last_good_list(tmp_path):
     a = make_stream("alpha")
-    sup, twitch, settings = setup(tmp_path, [a])
-    sup.tick()
+    sup, twitch, settings, clock = setup(tmp_path, [a])
+    sup.step()
     with open(settings.streams_file, "w") as f:
         f.write("{broken")
-    sup.tick()
+    touch(settings.streams_file)
+    sup.step()
     assert [s.channel for s in sup.streams] == ["alpha"]
     assert status(settings)["config_error"]
     save_streams(settings.streams_file, [a])
-    sup.tick()
+    touch(settings.streams_file)
+    sup.step()
     assert status(settings)["config_error"] is None
 
 
+def test_status_heartbeat(tmp_path):
+    sup, twitch, settings, clock = setup(tmp_path, [make_stream("alpha")])
+    sup.step()
+    first = status(settings)["updated_at"]
+    advance(sup, clock, 29)
+    assert status(settings)["updated_at"] == first
+    advance(sup, clock, 1)
+    assert status(settings)["updated_at"] != first
+
+
 def test_shutdown_stops_all(tmp_path):
-    sup, twitch, settings = setup(tmp_path, [make_stream("alpha")])
+    sup, twitch, settings, clock = setup(tmp_path, [make_stream("alpha")])
     twitch.live = {"alpha": info("alpha")}
-    sup.tick()
+    sup.step()
     sup.shutdown()
     assert FakeRecording.created[0].stopped

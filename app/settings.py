@@ -7,8 +7,9 @@ import ipaddress
 import os
 from dataclasses import dataclass, field
 
+from .streams import Options
+
 DEFAULT_ALLOWED_NETWORKS = "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
-MIN_CHECK_INTERVAL = 10
 
 
 class SettingsError(ValueError):
@@ -54,8 +55,8 @@ def parse_networks(value):
 class Settings:
     config_dir: str = "/config"
     recordings_dir: str = "/recordings"
-    check_interval: int = 60
-    default_quality: str = "best"
+    # Defaults for the options that can be changed in the web UI.
+    defaults: Options = field(default_factory=Options)
     client_id: str = None
     client_secret: str = None
     oauth_token: str = None
@@ -71,12 +72,24 @@ class Settings:
         return os.path.join(self.config_dir, "status.json")
 
 
+def load_defaults():
+    """Option defaults from env (CHECK_INTERVAL, DEFAULT_QUALITY, RESCAN_INTERVAL, RESCAN_DURATION)."""
+    try:
+        return Options().merged({
+            "check_interval": env("CHECK_INTERVAL", "timer"),
+            "default_quality": env("DEFAULT_QUALITY", "quality"),
+            "rescan_interval": env("RESCAN_INTERVAL"),
+            "rescan_duration": env("RESCAN_DURATION"),
+        })
+    except ValueError as error:
+        raise SettingsError(str(error)) from None
+
+
 def load_settings(require_twitch=False):
     settings = Settings(
         config_dir=env("CONFIG_DIR", default="/config"),
         recordings_dir=env("RECORDINGS_DIR", default="/recordings"),
-        check_interval=parse_int(env("CHECK_INTERVAL", "timer", default=60), "CHECK_INTERVAL", MIN_CHECK_INTERVAL),
-        default_quality=env("DEFAULT_QUALITY", "quality", default="best"),
+        defaults=load_defaults(),
         client_id=env("TWITCH_CLIENT_ID", "clientid"),
         client_secret=env("TWITCH_CLIENT_SECRET", "clientsecret"),
         oauth_token=env("TWITCH_OAUTH_TOKEN", "TWITCH_AUTH_TOKEN", "oauthtoken"),

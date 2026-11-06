@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from .naming import clean_output_path
 
@@ -50,24 +50,83 @@ class StreamConfig:
                    channel=channel, output=output, quality=quality, enabled=enabled)
 
 
-def load_streams(path):
+# Recorder options editable in the web UI: (min, max) for each number.
+OPTION_LIMITS = {
+    "check_interval": (10, 3600),
+    "rescan_interval": (5, 600),
+    "rescan_duration": (0, 3600),   # 0 disables the quick re-check after a stream ends
+}
+
+
+@dataclass
+class Options:
+    """Recorder options. Env values are the defaults; the web UI stores overrides in streams.json."""
+    check_interval: int = 60
+    default_quality: str = "best"
+    rescan_interval: int = 10
+    rescan_duration: int = 120
+
+    def merged(self, overrides):
+        """Return a copy with validated overrides applied (None values are ignored)."""
+        if not isinstance(overrides, dict):
+            raise ValueError("settings must be an object")
+        values = asdict(self)
+        for key, value in overrides.items():
+            if key not in values:
+                raise ValueError(f"unknown setting {key!r}")
+            if value is None:
+                continue
+            if key == "default_quality":
+                value = str(value).strip() or "best"
+                if not _QUALITY_RE.match(value):
+                    raise ValueError("default_quality may only list stream names like '1080p60,720p,best'")
+            else:
+                if isinstance(value, bool):
+                    raise ValueError(f"{key} must be a whole number")
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"{key} must be a whole number") from None
+                low, high = OPTION_LIMITS[key]
+                if not low <= value <= high:
+                    raise ValueError(f"{key} must be between {low} and {high} seconds")
+            values[key] = value
+        return Options(**values)
+
+
+@dataclass
+class Config:
+    """Content of streams.json: option overrides from the UI plus the channel list."""
+    settings: dict = field(default_factory=dict)
+    streams: list = field(default_factory=list)
+
+    def options(self, defaults):
+        return defaults.merged(self.settings)
+
+
+def load_config(path):
     """Read streams.json. A missing file means no channels; a broken one raises ValueError."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return []
+        return Config()
     except json.JSONDecodeError as error:
         raise ValueError(f"{path} is not valid JSON: {error}") from None
-    entries = data.get("streams", []) if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain an object")
+    entries = data.get("streams", [])
     if not isinstance(entries, list):
         raise ValueError(f"{path}: 'streams' must be a list")
-    return [StreamConfig.from_input(entry) for entry in entries]
+    settings = data.get("settings") or {}
+    Options().merged(settings)  # validate
+    return Config(settings={k: v for k, v in settings.items() if v is not None},
+                  streams=[StreamConfig.from_input(entry) for entry in entries])
 
 
-def save_streams(path, streams):
+def save_config(path, config):
     """Write streams.json atomically so the recorder never reads a half-written file."""
-    write_json_atomic(path, {"streams": [asdict(s) for s in streams]})
+    write_json_atomic(path, {"settings": config.settings, "streams": [asdict(s) for s in config.streams]})
 
 
 def write_json_atomic(path, data):

@@ -128,7 +128,7 @@ class Recording(threading.Thread):
         except NoStreamsAvailable:
             self.state = "waiting"
             self.error = "no playable stream yet"
-            logger.info("%s: no playable stream yet", self.stream.channel)
+            logger.debug("%s: no playable stream yet", self.stream.channel)
         except Exception as error:
             self.state = "error"
             self.error = describe_error(error)
@@ -147,7 +147,7 @@ class Recording(threading.Thread):
         streams = session.streams(f"https://www.twitch.tv/{self.stream.channel}", options=self._plugin_options())
         if not streams:
             raise NoStreamsAvailable
-        quality = select_quality(self.stream.quality or self.settings.default_quality, streams)
+        quality = select_quality(self.stream.quality, streams)
         selected = streams[quality]
 
         base = recording_base(self.settings.recordings_dir, self.stream.output, self.info.title, self._now())

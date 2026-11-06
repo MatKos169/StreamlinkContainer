@@ -79,3 +79,32 @@ async def test_status(settings):
         assert (await (await client.get("/api/status")).json())["status"] == {"updated_at": "x"}
     finally:
         await client.close()
+
+
+async def test_settings_api(settings):
+    client = await client_for(settings)
+    try:
+        data = await (await client.get("/api/settings")).json()
+        assert data["settings"] == data["defaults"]
+        assert data["settings"]["rescan_interval"] == 10
+
+        r = await client.put("/api/settings", json={"rescan_interval": "15", "rescan_duration": 300})
+        assert r.status == 200
+        data = await r.json()
+        assert (data["settings"]["rescan_interval"], data["settings"]["rescan_duration"]) == (15, 300)
+        assert data["overrides"] == {"rescan_interval": 15, "rescan_duration": 300}
+
+        # channel edits keep the settings
+        await client.post("/api/streams", json={"channel": "alpha"})
+        on_disk = json.load(open(settings.streams_file))
+        assert on_disk["settings"] == {"rescan_interval": 15, "rescan_duration": 300}
+        assert len(on_disk["streams"]) == 1
+
+        assert (await client.put("/api/settings", json={"rescan_interval": 1})).status == 400
+        assert (await client.put("/api/settings", json={"unknown": 1})).status == 400
+
+        data = await (await client.put("/api/settings", json={"rescan_interval": None, "rescan_duration": None})).json()
+        assert data["overrides"] == {}
+        assert data["settings"] == data["defaults"]
+    finally:
+        await client.close()
