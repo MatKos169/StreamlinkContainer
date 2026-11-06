@@ -78,6 +78,7 @@ OPTION_LIMITS = {
     "done_retention_days": (0, 3650),   # 0 keeps originals in /work/done forever
     "vod_segment_threads": (1, 10),
     "vod_parallel": (1, 5),
+    "max_parallel_streams": (0, 100),   # live recordings + VOD downloads; 0 = no limit
 }
 VOD_MODES = ("realtime", "download")
 VOD_SPEED_LIMITS = (0.25, 20.0)
@@ -100,6 +101,7 @@ class Options:
     vod_speed: float = 1.0              # realtime pace (1.0 = playback speed)
     vod_segment_threads: int = 3        # parallel segment downloads in download mode
     vod_parallel: int = 1               # VOD downloads at the same time
+    max_parallel_streams: int = 0       # Twitch streams at once (recordings + VODs); VODs only start below it
 
     def merged(self, overrides):
         """Return a copy with validated overrides applied (None values are ignored)."""

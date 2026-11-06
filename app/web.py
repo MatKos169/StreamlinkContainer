@@ -226,10 +226,13 @@ def _read_status(app):
 async def list_downloads(request):
     config_dir = request.app[SETTINGS_KEY].config_dir
     pending, failed = vod.list_requests(config_dir)
-    running = (_read_status(request.app) or {}).get("downloads") or {}
+    status = _read_status(request.app) or {}
+    running = status.get("downloads") or {}
     for item in pending:
         item["status"] = running.get(item["id"])
-    return web.json_response({"pending": pending, "failed": failed})
+    return web.json_response({"pending": pending, "failed": failed, "limit": {
+        "active": status.get("streams_active"), "max": status.get("streams_limit"),
+        "blocked": bool(status.get("downloads_blocked"))}})
 
 
 async def create_download(request):

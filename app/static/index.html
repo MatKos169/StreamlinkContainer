@@ -75,6 +75,7 @@
   <div><label for="vod-speed">Tempo (Echtzeit)</label><input type="number" id="vod-speed" min="0.25" max="20" step="0.25" placeholder="Standard"></div>
   <button type="submit">Herunterladen</button>
 </form>
+<div class="small" id="vod-limit"></div>
 <div class="small">Echtzeit lädt das VOD im Tempo der Wiedergabe (× Tempo) und spart so Bandbreite und Last bei Twitch. Download lädt so schnell wie möglich. Danach wird das VOD wie eine Aufnahme umgewandelt.</div>
 <table>
   <thead><tr><th>Status</th><th>VOD</th><th>Fortschritt</th><th></th></tr></thead>
@@ -133,6 +134,8 @@
     <span class="small">Parallele Segment-Downloads im Download-Modus (streamlink <code>stream-segment-threads</code>).</span>
     <label for="vod_parallel">Gleichzeitige VOD-Downloads</label><input type="number" id="vod_parallel" required>
     <span class="small">Weitere VODs warten, bis einer fertig ist.</span>
+    <label for="max_parallel_streams">Max. parallele Twitch-Streams</label><input type="number" id="max_parallel_streams" required>
+    <span class="small">Live-Aufnahmen und VOD-Downloads zusammen. Ist das Limit erreicht, startet kein neuer VOD-Download; Live-Aufnahmen laufen immer. 0 = kein Limit.</span>
     <label for="ffmpeg_args">Eigene ffmpeg-Parameter</label><input type="text" id="ffmpeg_args" placeholder="z.B. -crf 23 -preset medium">
     <span class="small">Werden direkt vor der Ausgabedatei angehängt und überschreiben damit die Optionen oben (z.B. <code>-c:a copy</code>, <code>-vf scale=-2:720</code>). Nicht erlaubt: <code>-i</code>, <code>-progress</code>, <code>-y</code>, <code>-n</code>. Gilt für neue Aufnahmen und für „Erneut versuchen“.</span>
     <div class="actions"><button type="submit">Speichern</button><button type="button" id="settings-reset">Auf Standard (Umgebungsvariablen) zurücksetzen</button></div>
@@ -230,7 +233,7 @@ document.getElementById("add").addEventListener("submit", async (ev) => {
   try { await api("POST", "/api/streams", body); ev.target.reset(); showError(); await load(); } catch (e) { showError(e); }
 });
 
-const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "done_retention_days", "audio_normalize", "video_codec", "ffmpeg_args", "vod_mode", "vod_speed", "vod_segment_threads", "vod_parallel"];
+const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "done_retention_days", "audio_normalize", "video_codec", "ffmpeg_args", "vod_mode", "vod_speed", "vod_segment_threads", "vod_parallel", "max_parallel_streams"];
 const LAYOUT_HINT = { none: "/", year: "/&lt;Jahr&gt;/", year_month: "/&lt;Jahr&gt;/&lt;Monat&gt;/", date: "/&lt;Datum&gt;/", output_year_month: "-&lt;Jahr&gt;/&lt;Monat&gt;/" };
 
 function fillSettings(data) {
@@ -351,6 +354,9 @@ document.getElementById("done-delete-all").addEventListener("click", async () =>
 const VOD_STATES = { starting: "startet", downloading: "lädt", done: "fertig", error: "Fehler", cancelled: "abgebrochen", stopped: "angehalten" };
 
 function renderVods(data) {
+  const lim = data.limit || {};
+  document.getElementById("vod-limit").textContent = lim.active == null ? "" :
+    `Twitch-Streams: ${lim.active}${lim.max ? " von " + lim.max : ""} belegt` + (lim.blocked ? " – Limit erreicht, VOD-Downloads warten." : "");
   const body = document.getElementById("vods");
   body.replaceChildren();
   if (!data.pending.length && !data.failed.length) {
@@ -360,7 +366,7 @@ function renderVods(data) {
   for (const d of data.pending) {
     const st = d.status;
     const mode = (st && st.mode) || d.mode;
-    const label = d.cancel ? "wird abgebrochen" : st ? (VOD_STATES[st.state] || st.state) : "wartet";
+    const label = d.cancel ? "wird abgebrochen" : st ? (VOD_STATES[st.state] || st.state) : lim.blocked ? "wartet (Limit erreicht)" : "wartet";
     const progress = el("td", {});
     if (st && st.state === "downloading") {
       const p = st.progress;

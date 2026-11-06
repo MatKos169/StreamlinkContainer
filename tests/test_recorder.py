@@ -357,3 +357,65 @@ def test_cancel_before_start(tmp_path):
     vod.cancel_request(settings.config_dir, r["id"])
     sup.step()
     assert FakeDownload.created == [] and vod.list_requests(settings.config_dir) == ([], [])
+
+
+
+def test_stream_limit_holds_back_vod_downloads(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    streams = [make_stream(c) for c in ("a", "b", "c", "d")]
+    sup, twitch, settings, clock = setup(tmp_path, streams, overrides={"max_parallel_streams": 3, "vod_parallel": 5})
+    sup.download_factory = FakeDownload
+    twitch.live = {"a": info("a"), "b": info("b"), "c": info("c")}
+    vod.create_request(settings.config_dir, "1")
+    vod.create_request(settings.config_dir, "2")
+    sup.step()
+    assert len(FakeRecording.created) == 3 and FakeDownload.created == []      # 3 of 3 in use
+    st = status(settings)
+    assert (st["streams_active"], st["streams_limit"], st["downloads_blocked"]) == (3, 3, True)
+
+    FakeRecording.created[2].end()                                            # c ends: one slot free
+    twitch.live = {"a": info("a"), "b": info("b")}
+    advance(sup, clock, 1)
+    assert len(FakeDownload.created) == 1                                     # only one fits
+    assert status(settings)["streams_active"] == 3
+
+    twitch.live = {"a": info("a"), "b": info("b"), "d": info("d")}            # d goes live although full
+    advance(sup, clock, 60)
+    assert "d" in [r.stream.channel for r in FakeRecording.created]           # live is never held back
+    assert sup.active_streams() == 4
+    assert not FakeDownload.created[0].stopped                                # running download keeps going
+    assert len(FakeDownload.created) == 1
+
+
+def test_rescan_probes_do_not_take_a_slot(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    a = make_stream("a")
+    sup, twitch, settings, clock = setup(tmp_path, [a], overrides={"max_parallel_streams": 1})
+    sup.download_factory = FakeDownload
+    twitch.live = {"a": info("a")}
+    sup.step()
+    FakeRecording.created[0].record()
+    twitch.live = {}
+    FakeRecording.created[0].end()
+    advance(sup, clock, 11)                                                   # 10s after the end: probe starts
+    probe = FakeRecording.created[-1]
+    assert probe.probe and probe.alive and not probe.file
+    vod.create_request(settings.config_dir, "1")
+    advance(sup, clock, 1)
+    assert len(FakeDownload.created) == 1                                     # a probe does not take the slot
+    probe.record()                                                            # ...but a probe that records does
+    assert sup.active_streams() == 2
+
+
+def test_no_limit_by_default(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    streams = [make_stream(c) for c in ("a", "b", "c")]
+    sup, twitch, settings, clock = setup(tmp_path, streams)
+    sup.download_factory = FakeDownload
+    twitch.live = {c: info(c) for c in ("a", "b", "c")}
+    vod.create_request(settings.config_dir, "1")
+    sup.step()
+    assert len(FakeDownload.created) == 1 and status(settings)["streams_limit"] == 0

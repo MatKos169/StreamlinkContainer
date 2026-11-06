@@ -64,6 +64,7 @@ class Supervisor:
         self.download_factory = download_factory or self._default_download
         self.downloads = {}       # request id -> running VodDownload
         self.download_errors = 0
+        self.downloads_blocked = False   # a pending download waits for max_parallel_streams
 
     # -- config ---------------------------------------------------------
 
@@ -103,6 +104,7 @@ class Supervisor:
     def _start(self, stream, info, reason, quiet=False):
         resolved = dataclasses.replace(stream, quality=stream.quality or self.options.default_quality)
         rec = self.recording_factory(resolved, info, self.settings, self.options)
+        rec.probe = quiet          # quick re-check after a stream end (counts only once it records)
         self.recordings[stream.id] = rec
         rec.start()
         self._dirty = True
@@ -178,6 +180,7 @@ class Supervisor:
         self._manage_downloads()
         signature = tuple((sid, rec.state, rec.file) for sid, rec in sorted(self.recordings.items()))
         signature += tuple((rid, d.state, int((d.progress or 0) * 100)) for rid, d in sorted(self.downloads.items()))
+        signature += (self.active_streams(),)
         if signature != self._rec_signature:
             self._rec_signature = signature
             self._dirty = True
@@ -193,6 +196,11 @@ class Supervisor:
             fetcher = lambda video_id: TwitchClient(self.settings.client_id, self.settings.client_secret).get_video(video_id)
         return vod.VodDownload(request, self.settings, self.options, channel_outputs=channel_outputs,
                                metadata_fetcher=fetcher)
+
+    def active_streams(self):
+        """Twitch streams in use: live recordings (probes only once they record) plus VOD downloads."""
+        recordings = sum(1 for rec in self.recordings.values() if not getattr(rec, "probe", False) or rec.file)
+        return recordings + len(self.downloads)
 
     def _manage_downloads(self):
         config_dir = self.settings.config_dir
@@ -216,6 +224,7 @@ class Supervisor:
             elif download.state == "error":
                 vod.finish_request(config_dir, download.request, error=download.error)
                 self.download_errors += 1
+        blocked = False
         for request in pending:
             rid = request["id"]
             if rid in self.downloads or rid in ended:
@@ -226,11 +235,22 @@ class Supervisor:
                 continue
             if len(self.downloads) >= self.options.vod_parallel:
                 break
+            limit = self.options.max_parallel_streams
+            if limit and self.active_streams() >= limit:
+                # Live recordings are never held back; VOD downloads wait until a slot is free.
+                blocked = True
+                break
             # Without an own output folder, a VOD goes to its channel's folder if that channel is configured.
             download = self.download_factory(request, {s.channel: s.output for s in self.streams})
             self.downloads[rid] = download
             download.start()
             self._dirty = True
+        if blocked != self.downloads_blocked:
+            self.downloads_blocked = blocked
+            self._dirty = True
+            if blocked:
+                logger.info("VOD downloads wait: %d of %d Twitch streams in use",
+                            self.active_streams(), self.options.max_parallel_streams)
 
     def download_status(self):
         return {rid: {"state": d.state, "title": d.title, "channel": d.channel, "mode": d.mode, "speed": d.speed,
@@ -289,6 +309,9 @@ class Supervisor:
             "config_error": self.config_error,
             "streams": {s.id: self.stream_status(s, now) for s in self.streams},
             "downloads": self.download_status(),
+            "streams_active": self.active_streams(),
+            "streams_limit": self.options.max_parallel_streams,
+            "downloads_blocked": self.downloads_blocked,
         }
         try:
             write_json_atomic(self.settings.status_file, data)

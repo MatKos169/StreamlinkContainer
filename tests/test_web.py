@@ -199,6 +199,10 @@ async def test_downloads_api(settings):
             json.dump({"downloads": {created["id"]: {"state": "downloading", "progress": 0.3}}}, f)
         data = await (await client.get("/api/downloads")).json()
         assert data["pending"][0]["status"]["progress"] == 0.3
+        assert data["limit"] == {"active": None, "max": None, "blocked": False}
+        with open(settings.status_file, "w") as f:
+            json.dump({"downloads": {}, "streams_active": 3, "streams_limit": 3, "downloads_blocked": True}, f)
+        assert (await (await client.get("/api/downloads")).json())["limit"] == {"active": 3, "max": 3, "blocked": True}
 
         assert (await (await client.delete(f"/api/downloads/{created['id']}")).json()) == {"cancelled": True}
         from app import vod
@@ -220,7 +224,9 @@ async def test_vod_settings(settings):
         assert {k: data["settings"][k] for k in ("vod_mode", "vod_speed", "vod_segment_threads", "vod_parallel")} == {
             "vod_mode": "download", "vod_speed": 1.5, "vod_segment_threads": 4, "vod_parallel": 2}
         assert data["defaults"]["vod_mode"] == "realtime"
-        for bad in ({"vod_mode": "turbo"}, {"vod_speed": 0}, {"vod_speed": "x"}, {"vod_segment_threads": 11}):
+        assert (await (await client.put("/api/settings", json={"max_parallel_streams": 3})).json())["settings"]["max_parallel_streams"] == 3
+        for bad in ({"vod_mode": "turbo"}, {"vod_speed": 0}, {"vod_speed": "x"}, {"vod_segment_threads": 11},
+                    {"max_parallel_streams": -1}, {"max_parallel_streams": 101}):
             assert (await client.put("/api/settings", json=bad)).status == 400
     finally:
         await client.close()
