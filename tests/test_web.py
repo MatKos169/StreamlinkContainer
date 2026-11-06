@@ -199,10 +199,12 @@ async def test_downloads_api(settings):
             json.dump({"downloads": {created["id"]: {"state": "downloading", "progress": 0.3}}}, f)
         data = await (await client.get("/api/downloads")).json()
         assert data["pending"][0]["status"]["progress"] == 0.3
-        assert data["limit"] == {"active": None, "max": None, "blocked": False}
+        assert data["limit"] == {"active": None, "max": None, "cooldown": 0, "blocked": False}
         with open(settings.status_file, "w") as f:
-            json.dump({"downloads": {}, "streams_active": 3, "streams_limit": 3, "downloads_blocked": True}, f)
-        assert (await (await client.get("/api/downloads")).json())["limit"] == {"active": 3, "max": 3, "blocked": True}
+            json.dump({"downloads": {}, "streams_active": 3, "streams_limit": 3, "streams_cooldown": 1,
+                       "downloads_blocked": True}, f)
+        assert (await (await client.get("/api/downloads")).json())["limit"] == {
+            "active": 3, "max": 3, "cooldown": 1, "blocked": True}
 
         assert (await (await client.delete(f"/api/downloads/{created['id']}")).json()) == {"cancelled": True}
         from app import vod

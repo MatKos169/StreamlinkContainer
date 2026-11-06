@@ -135,7 +135,7 @@
     <label for="vod_parallel">Gleichzeitige VOD-Downloads</label><input type="number" id="vod_parallel" required>
     <span class="small">Weitere VODs warten, bis einer fertig ist.</span>
     <label for="max_parallel_streams">Max. parallele Twitch-Streams</label><input type="number" id="max_parallel_streams" required>
-    <span class="small">Live-Aufnahmen und VOD-Downloads zusammen. Ist das Limit erreicht, startet kein neuer VOD-Download; Live-Aufnahmen laufen immer. 0 = kein Limit.</span>
+    <span class="small">Live-Aufnahmen und VOD-Downloads zusammen. Ist das Limit erreicht, startet kein neuer VOD-Download; Live-Aufnahmen laufen immer. Ein Kanal in der Nachprüfung hält seinen Platz, falls der Stream wiederkommt. 0 = kein Limit.</span>
     <label for="ffmpeg_args">Eigene ffmpeg-Parameter</label><input type="text" id="ffmpeg_args" placeholder="z.B. -crf 23 -preset medium">
     <span class="small">Werden direkt vor der Ausgabedatei angehängt und überschreiben damit die Optionen oben (z.B. <code>-c:a copy</code>, <code>-vf scale=-2:720</code>). Nicht erlaubt: <code>-i</code>, <code>-progress</code>, <code>-y</code>, <code>-n</code>. Gilt für neue Aufnahmen und für „Erneut versuchen“.</span>
     <div class="actions"><button type="submit">Speichern</button><button type="button" id="settings-reset">Auf Standard (Umgebungsvariablen) zurücksetzen</button></div>
@@ -356,7 +356,9 @@ const VOD_STATES = { starting: "startet", downloading: "lädt", done: "fertig", 
 function renderVods(data) {
   const lim = data.limit || {};
   document.getElementById("vod-limit").textContent = lim.active == null ? "" :
-    `Twitch-Streams: ${lim.active}${lim.max ? " von " + lim.max : ""} belegt` + (lim.blocked ? " – Limit erreicht, VOD-Downloads warten." : "");
+    `Twitch-Streams: ${lim.active}${lim.max ? " von " + lim.max : ""} belegt`
+    + (lim.cooldown ? ` (davon ${lim.cooldown} reserviert für Kanäle in der Nachprüfung)` : "")
+    + (lim.blocked ? " – Limit erreicht, VOD-Downloads warten." : "");
   const body = document.getElementById("vods");
   body.replaceChildren();
   if (!data.pending.length && !data.failed.length) {

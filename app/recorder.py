@@ -180,7 +180,7 @@ class Supervisor:
         self._manage_downloads()
         signature = tuple((sid, rec.state, rec.file) for sid, rec in sorted(self.recordings.items()))
         signature += tuple((rid, d.state, int((d.progress or 0) * 100)) for rid, d in sorted(self.downloads.items()))
-        signature += (self.active_streams(),)
+        signature += (self.active_streams(), self.cooldown_streams())
         if signature != self._rec_signature:
             self._rec_signature = signature
             self._dirty = True
@@ -198,9 +198,15 @@ class Supervisor:
                                metadata_fetcher=fetcher)
 
     def active_streams(self):
-        """Twitch streams in use: live recordings (probes only once they record) plus VOD downloads."""
-        recordings = sum(1 for rec in self.recordings.values() if not getattr(rec, "probe", False) or rec.file)
-        return recordings + len(self.downloads)
+        """Twitch stream slots in use: live recordings, channels in the quick re-check after a
+        stream end (cooldown: the slot stays reserved in case the stream comes back) and VOD downloads."""
+        channels = {sid for sid, rec in self.recordings.items() if not getattr(rec, "probe", False) or rec.file}
+        return len(channels | set(self.rescan)) + len(self.downloads)
+
+    def cooldown_streams(self):
+        """Channels holding a slot only because of the quick re-check (no recording running)."""
+        recording = {sid for sid, rec in self.recordings.items() if not getattr(rec, "probe", False) or rec.file}
+        return len(set(self.rescan) - recording)
 
     def _manage_downloads(self):
         config_dir = self.settings.config_dir
@@ -237,7 +243,8 @@ class Supervisor:
                 break
             limit = self.options.max_parallel_streams
             if limit and self.active_streams() >= limit:
-                # Live recordings are never held back; VOD downloads wait until a slot is free.
+                # Live recordings are never held back; VOD downloads wait until a slot is free
+                # (a channel in its re-check cooldown still holds its slot).
                 blocked = True
                 break
             # Without an own output folder, a VOD goes to its channel's folder if that channel is configured.
@@ -310,6 +317,7 @@ class Supervisor:
             "streams": {s.id: self.stream_status(s, now) for s in self.streams},
             "downloads": self.download_status(),
             "streams_active": self.active_streams(),
+            "streams_cooldown": self.cooldown_streams(),
             "streams_limit": self.options.max_parallel_streams,
             "downloads_blocked": self.downloads_blocked,
         }

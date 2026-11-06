@@ -232,6 +232,7 @@ async def list_downloads(request):
         item["status"] = running.get(item["id"])
     return web.json_response({"pending": pending, "failed": failed, "limit": {
         "active": status.get("streams_active"), "max": status.get("streams_limit"),
+        "cooldown": status.get("streams_cooldown") or 0,
         "blocked": bool(status.get("downloads_blocked"))}})
 
 

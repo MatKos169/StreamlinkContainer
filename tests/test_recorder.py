@@ -388,7 +388,35 @@ def test_stream_limit_holds_back_vod_downloads(tmp_path):
     assert len(FakeDownload.created) == 1
 
 
-def test_rescan_probes_do_not_take_a_slot(tmp_path):
+def test_rescan_cooldown_keeps_the_slot(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    a = make_stream("a")
+    sup, twitch, settings, clock = setup(tmp_path, [a], overrides={"max_parallel_streams": 1, "rescan_duration": 60})
+    sup.download_factory = FakeDownload
+    twitch.live = {"a": info("a")}
+    sup.step()
+    FakeRecording.created[0].record()
+    vod.create_request(settings.config_dir, "1")
+    advance(sup, clock, 1)
+    assert FakeDownload.created == []                                         # recording uses the slot
+    twitch.live = {}
+    FakeRecording.created[0].end()
+    advance(sup, clock, 1)                                                    # stream ended: cooldown starts
+    st = status(settings)
+    assert (st["streams_active"], st["streams_cooldown"], st["downloads_blocked"]) == (1, 1, True)
+    for _ in range(58):
+        advance(sup, clock, 1)
+        for rec in FakeRecording.created[1:]:
+            if rec.alive:
+                rec.end("waiting")                                            # probes find nothing
+    assert FakeDownload.created == []                                         # slot held for the whole window
+    advance(sup, clock, 2)                                                    # window over
+    assert len(FakeDownload.created) == 1
+    assert status(settings)["streams_cooldown"] == 0
+
+
+def test_stream_back_during_cooldown_gets_its_slot(tmp_path):
     from app import vod
     FakeDownload.created = []
     a = make_stream("a")
@@ -399,14 +427,29 @@ def test_rescan_probes_do_not_take_a_slot(tmp_path):
     FakeRecording.created[0].record()
     twitch.live = {}
     FakeRecording.created[0].end()
-    advance(sup, clock, 11)                                                   # 10s after the end: probe starts
-    probe = FakeRecording.created[-1]
-    assert probe.probe and probe.alive and not probe.file
     vod.create_request(settings.config_dir, "1")
+    advance(sup, clock, 11)                                                   # probe after 10s
+    probe = FakeRecording.created[-1]
+    assert probe.probe and FakeDownload.created == []
+    probe.record()                                                            # stream is back
     advance(sup, clock, 1)
-    assert len(FakeDownload.created) == 1                                     # a probe does not take the slot
-    probe.record()                                                            # ...but a probe that records does
-    assert sup.active_streams() == 2
+    assert sup.active_streams() == 1 and FakeDownload.created == []
+
+
+def test_no_cooldown_when_rescan_disabled(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    a = make_stream("a")
+    sup, twitch, settings, clock = setup(tmp_path, [a], overrides={"max_parallel_streams": 1, "rescan_duration": 0})
+    sup.download_factory = FakeDownload
+    twitch.live = {"a": info("a")}
+    sup.step()
+    FakeRecording.created[0].record()
+    vod.create_request(settings.config_dir, "1")
+    twitch.live = {}
+    FakeRecording.created[0].end()
+    advance(sup, clock, 1)
+    assert len(FakeDownload.created) == 1
 
 
 def test_no_limit_by_default(tmp_path):
