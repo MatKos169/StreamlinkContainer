@@ -52,6 +52,7 @@ class Supervisor:
         self.last_result = {}     # stream id -> last recording that produced a file
         self.last_info = {}       # stream id -> last LiveInfo from Helix (title/category for rescans)
         self.rescan = {}          # stream id -> {"until": t, "next": t} (monotonic)
+        self.cooldown = {}        # stream id -> t (monotonic): slot reserved after a stream end
         self.live = None          # result of the last Helix check, None if it failed / never ran
         self.config_error = None
         self.twitch_error = None
@@ -121,6 +122,8 @@ class Supervisor:
             self._dirty = True
             if rec.file:  # it actually recorded: remember it and watch for a quick restart
                 self.last_result[sid] = {"state": rec.state, "error": rec.error, "file": rec.file, "at": _iso(self.wallclock())}
+                if target is not None and self.options.slot_cooldown > 0:
+                    self.cooldown[sid] = now + self.options.slot_cooldown
                 if target is not None and self.options.rescan_duration > 0:
                     self.rescan[sid] = {"until": now + self.options.rescan_duration,
                                         "next": now + self.options.rescan_interval}
@@ -176,6 +179,7 @@ class Supervisor:
         if now >= self.next_check:
             self._check_twitch(wanted, now)
         self._run_rescans(wanted, now)
+        self._update_cooldowns(wanted, now)
         self._prune_done(now)
         self._manage_downloads()
         signature = tuple((sid, rec.state, rec.file) for sid, rec in sorted(self.recordings.items()))
@@ -197,16 +201,41 @@ class Supervisor:
         return vod.VodDownload(request, self.settings, self.options, channel_outputs=channel_outputs,
                                metadata_fetcher=fetcher)
 
+    def _recording_ids(self):
+        return {sid for sid, rec in self.recordings.items() if not getattr(rec, "probe", False) or rec.file}
+
     def active_streams(self):
-        """Twitch stream slots in use: live recordings, channels in the quick re-check after a
-        stream end (cooldown: the slot stays reserved in case the stream comes back) and VOD downloads."""
-        channels = {sid for sid, rec in self.recordings.items() if not getattr(rec, "probe", False) or rec.file}
-        return len(channels | set(self.rescan)) + len(self.downloads)
+        """Twitch stream slots in use: live recordings, channels in their slot cooldown after a
+        stream end (the slot stays reserved in case the stream comes back) and VOD downloads."""
+        return len(self._recording_ids() | set(self.cooldown)) + len(self.downloads)
 
     def cooldown_streams(self):
-        """Channels holding a slot only because of the quick re-check (no recording running)."""
-        recording = {sid for sid, rec in self.recordings.items() if not getattr(rec, "probe", False) or rec.file}
-        return len(set(self.rescan) - recording)
+        """Channels holding a slot only because of the cooldown (no recording running)."""
+        return len(set(self.cooldown) - self._recording_ids())
+
+    def _update_cooldowns(self, wanted, now):
+        """Expire cooldowns, drop them for removed/disabled channels or when recording again,
+        and apply "Platz freigeben" requests from the web UI (/config/commands/release-<id>)."""
+        folder = os.path.join(self.settings.config_dir, "commands")
+        try:
+            commands = os.listdir(folder)
+        except FileNotFoundError:
+            commands = []
+        for name in commands:
+            if name.startswith("release-"):
+                sid = name[len("release-"):]
+                if self.cooldown.pop(sid, None) is not None:
+                    logger.info("Stream slot of %s released from the web UI", sid)
+                try:
+                    os.remove(os.path.join(folder, name))
+                except FileNotFoundError:
+                    pass
+                self._dirty = True
+        recording = self._recording_ids()
+        for sid, until in list(self.cooldown.items()):
+            if now >= until or sid not in wanted or sid in recording:
+                del self.cooldown[sid]
+                self._dirty = True
 
     def _manage_downloads(self):
         config_dir = self.settings.config_dir
@@ -244,7 +273,7 @@ class Supervisor:
             limit = self.options.max_parallel_streams
             if limit and self.active_streams() >= limit:
                 # Live recordings are never held back; VOD downloads wait until a slot is free
-                # (a channel in its re-check cooldown still holds its slot).
+                # (a channel in its slot cooldown after a stream end still holds its slot).
                 blocked = True
                 break
             # Without an own output folder, a VOD goes to its channel's folder if that channel is configured.
@@ -287,10 +316,12 @@ class Supervisor:
         rec = self.recordings.get(stream.id)
         info = (self.live or {}).get(stream.channel)
         window = self.rescan.get(stream.id)
+        cooldown = self.cooldown.get(stream.id)
         status = {"live": None if self.live is None else info is not None,
                   "category": info.category if info else None,
                   "title": info.title if info else None,
                   "rescan_until": _iso(self.wallclock() + window["until"] - now) if window else None,
+                  "cooldown_until": _iso(self.wallclock() + cooldown - now) if cooldown else None,
                   "last": self.last_result.get(stream.id)}
         if not stream.enabled:
             status["state"] = "disabled"

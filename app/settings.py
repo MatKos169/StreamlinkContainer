@@ -92,6 +92,7 @@ def load_defaults():
             "vod_segment_threads": env("VOD_SEGMENT_THREADS"),
             "vod_parallel": env("VOD_PARALLEL"),
             "max_parallel_streams": env("MAX_PARALLEL_STREAMS"),
+            "slot_cooldown": env("SLOT_COOLDOWN"),
         })
     except ValueError as error:
         raise SettingsError(str(error)) from None

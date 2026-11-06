@@ -232,3 +232,20 @@ async def test_vod_settings(settings):
             assert (await client.put("/api/settings", json=bad)).status == 400
     finally:
         await client.close()
+
+
+
+async def test_release_slot_api(settings):
+    client = await client_for(settings)
+    try:
+        created = await (await client.post("/api/streams", json={"channel": "alpha"})).json()
+        r = await client.post(f"/api/streams/{created['id']}/release-slot", json={})
+        assert r.status == 200
+        assert os.path.exists(os.path.join(settings.config_dir, "commands", f"release-{created['id']}"))
+        assert (await client.post("/api/streams/nope/release-slot", json={})).status == 404
+        assert (await client.post(f"/api/streams/{created['id']}/release-slot", data="",
+                                  headers={"Content-Type": "text/plain"})).status == 415
+        assert (await (await client.put("/api/settings", json={"slot_cooldown": 45})).json())["settings"]["slot_cooldown"] == 45
+        assert (await client.put("/api/settings", json={"slot_cooldown": 3601})).status == 400
+    finally:
+        await client.close()

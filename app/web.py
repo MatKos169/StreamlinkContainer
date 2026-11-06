@@ -125,6 +125,20 @@ async def delete_stream(request):
     return web.Response(status=204)
 
 
+async def release_slot(request):
+    """Release the stream slot a channel holds in its cooldown (the recorder applies it within a second)."""
+    await _read_json(request)
+    sid = request.match_info["id"]
+    config = load_config(_path(request.app))
+    if not any(s.id == sid for s in config.streams):
+        return _error(404, "unknown stream")
+    folder = os.path.join(request.app[SETTINGS_KEY].config_dir, "commands")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, f"release-{sid}"), "w"):
+        pass
+    return web.json_response({"released": sid})
+
+
 def _settings_response(app, config):
     defaults = app[SETTINGS_KEY].defaults
     return web.json_response({
@@ -290,6 +304,7 @@ def create_app(settings):
         web.post("/api/streams", create_stream),
         web.put("/api/streams/{id}", update_stream),
         web.delete("/api/streams/{id}", delete_stream),
+        web.post("/api/streams/{id}/release-slot", release_slot),
         web.get("/api/status", get_status),
         web.get("/api/settings", get_settings),
         web.put("/api/settings", update_settings),

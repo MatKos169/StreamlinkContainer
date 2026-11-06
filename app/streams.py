@@ -79,6 +79,7 @@ OPTION_LIMITS = {
     "vod_segment_threads": (1, 10),
     "vod_parallel": (1, 5),
     "max_parallel_streams": (0, 100),   # live recordings + VOD downloads; 0 = no limit
+    "slot_cooldown": (0, 3600),         # seconds a channel keeps its slot after a stream end
 }
 VOD_MODES = ("realtime", "download")
 VOD_SPEED_LIMITS = (0.25, 20.0)
@@ -102,6 +103,7 @@ class Options:
     vod_segment_threads: int = 3        # parallel segment downloads in download mode
     vod_parallel: int = 1               # VOD downloads at the same time
     max_parallel_streams: int = 0       # Twitch streams at once (recordings + VODs); VODs only start below it
+    slot_cooldown: int = 120            # after a stream end its slot stays reserved this long (0 = not at all)
 
     def merged(self, overrides):
         """Return a copy with validated overrides applied (None values are ignored)."""
