@@ -54,6 +54,28 @@ class TwitchClient:
                 live[login] = LiveInfo(login, stream.title or "", stream.game_id or "", stream.game_name or "")
         return live
 
+    async def _fetch_video(self, video_id):
+        from twitchAPI.twitch import Twitch
+        if self._twitch is None:
+            self._twitch = await Twitch(self.client_id, self.client_secret)
+        # Helix rejects "first" together with ids; twitchAPI defaults it to 20.
+        async for video in self._twitch.get_videos(ids=[video_id], first=None):
+            return video
+        return None
+
+    def get_video(self, video_id):
+        """Helix metadata of a VOD: {"title", "login", "created_at" (aware datetime), "duration" (s)}."""
+        from .vod import parse_twitch_duration
+        try:
+            video = self._loop.run_until_complete(asyncio.wait_for(self._fetch_video(video_id), TWITCH_CALL_TIMEOUT))
+        except BaseException:
+            self._twitch = None
+            raise
+        if video is None:
+            return {}
+        return {"title": video.title or "", "login": (video.user_login or "").lower(),
+                "created_at": video.created_at, "duration": parse_twitch_duration(video.duration)}
+
     def get_live(self, logins):
         """Return {login: LiveInfo} for the live channels among logins. Raises on API errors."""
         if not logins:

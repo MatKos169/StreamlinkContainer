@@ -122,6 +122,10 @@ def recover_recordings(work_dir):
         return []
     recovered = []
     for job_id in sorted(os.listdir(folder)):
+        if read_job(os.path.join(folder, job_id)).get("kind") == "vod":
+            # VOD downloads start over (their request is still pending); drop the partial file.
+            remove(os.path.join(folder, job_id))
+            continue
         if finish_recording(work_dir, job_id, {"complete": False, "error": "recorder restarted during recording"}):
             recovered.append(job_id)
     return recovered

@@ -19,7 +19,7 @@ import threading
 import os
 import time
 
-from . import jobs
+from . import jobs, vod
 from .recording import Recording
 from .settings import SettingsError, load_settings
 from .streams import load_config, write_json_atomic
@@ -39,7 +39,8 @@ def _iso(ts=None):
 
 
 class Supervisor:
-    def __init__(self, settings, twitch, recording_factory=Recording, clock=time.monotonic, wallclock=time.time):
+    def __init__(self, settings, twitch, recording_factory=Recording, clock=time.monotonic, wallclock=time.time,
+                 download_factory=None):
         self.settings = settings
         self.twitch = twitch
         self.recording_factory = recording_factory
@@ -60,6 +61,9 @@ class Supervisor:
         self._last_status = None
         self._rec_signature = ()
         self._next_prune = 0.0
+        self.download_factory = download_factory or self._default_download
+        self.downloads = {}       # request id -> running VodDownload
+        self.download_errors = 0
 
     # -- config ---------------------------------------------------------
 
@@ -171,12 +175,69 @@ class Supervisor:
             self._check_twitch(wanted, now)
         self._run_rescans(wanted, now)
         self._prune_done(now)
+        self._manage_downloads()
         signature = tuple((sid, rec.state, rec.file) for sid, rec in sorted(self.recordings.items()))
+        signature += tuple((rid, d.state, int((d.progress or 0) * 100)) for rid, d in sorted(self.downloads.items()))
         if signature != self._rec_signature:
             self._rec_signature = signature
             self._dirty = True
         if self._dirty or self._last_status is None or now - self._last_status >= STATUS_HEARTBEAT_SECONDS:
             self.write_status(now)
+
+    # -- VOD downloads --------------------------------------------------
+
+    def _default_download(self, request, channel_outputs):
+        fetcher = None
+        if self.settings.client_id and self.settings.client_secret:
+            # Own client per download: TwitchClient is not thread-safe.
+            fetcher = lambda video_id: TwitchClient(self.settings.client_id, self.settings.client_secret).get_video(video_id)
+        return vod.VodDownload(request, self.settings, self.options, channel_outputs=channel_outputs,
+                               metadata_fetcher=fetcher)
+
+    def _manage_downloads(self):
+        config_dir = self.settings.config_dir
+        try:
+            pending, _ = vod.list_requests(config_dir)
+        except OSError:
+            return
+        by_id = {r["id"]: r for r in pending}
+        ended = set()
+        for rid, download in list(self.downloads.items()):
+            request = by_id.get(rid)
+            if request is None or request.get("cancel"):
+                download.stop(cancel=True)
+            if download.is_alive():
+                continue
+            del self.downloads[rid]
+            ended.add(rid)   # its request is in `pending` (read above); don't start it again
+            self._dirty = True
+            if download.state == "done" or download.state == "cancelled" or request is None:
+                vod.finish_request(config_dir, download.request)
+            elif download.state == "error":
+                vod.finish_request(config_dir, download.request, error=download.error)
+                self.download_errors += 1
+        for request in pending:
+            rid = request["id"]
+            if rid in self.downloads or rid in ended:
+                continue
+            if request.get("cancel"):
+                vod.finish_request(config_dir, request)
+                self._dirty = True
+                continue
+            if len(self.downloads) >= self.options.vod_parallel:
+                break
+            # Without an own output folder, a VOD goes to its channel's folder if that channel is configured.
+            download = self.download_factory(request, {s.channel: s.output for s in self.streams})
+            self.downloads[rid] = download
+            download.start()
+            self._dirty = True
+
+    def download_status(self):
+        return {rid: {"state": d.state, "title": d.title, "channel": d.channel, "mode": d.mode, "speed": d.speed,
+                      "progress": d.progress, "media_seconds": int(d.media_seconds), "duration": d.duration,
+                      "bytes": d.bytes, "file": d.file, "error": d.error,
+                      "elapsed_seconds": int(time.monotonic() - d.started)}
+                for rid, d in self.downloads.items()}
 
     def _prune_done(self, now):
         """Delete kept originals older than done_retention_days (hourly; works without the web UI)."""
@@ -227,6 +288,7 @@ class Supervisor:
             "twitch_error": self.twitch_error,
             "config_error": self.config_error,
             "streams": {s.id: self.stream_status(s, now) for s in self.streams},
+            "downloads": self.download_status(),
         }
         try:
             write_json_atomic(self.settings.status_file, data)
@@ -245,11 +307,13 @@ class Supervisor:
         self.shutdown()
 
     def shutdown(self):
-        for rec in self.recordings.values():
-            rec.stop()
-        for rec in self.recordings.values():
-            rec.join(SHUTDOWN_TIMEOUT)
+        workers = list(self.recordings.values()) + list(self.downloads.values())
+        for worker in workers:
+            worker.stop()
+        for worker in workers:
+            worker.join(SHUTDOWN_TIMEOUT)
         self.recordings.clear()
+        self.downloads.clear()
 
 
 def main():

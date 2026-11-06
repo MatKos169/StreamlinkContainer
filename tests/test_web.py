@@ -181,3 +181,46 @@ async def test_done_api(settings):
         assert r.status == 400 and "days" in (await r.json())["error"]
     finally:
         await client.close()
+
+
+
+async def test_downloads_api(settings):
+    client = await client_for(settings)
+    try:
+        r = await client.post("/api/downloads", json={"url": "https://www.twitch.tv/videos/999", "mode": "download"})
+        assert r.status == 201
+        created = await r.json()
+        assert (await client.post("/api/downloads", json={"url": "https://www.twitch.tv/x"})).status == 400
+        data = await (await client.get("/api/downloads")).json()
+        assert [d["id"] for d in data["pending"]] == [created["id"]] and data["pending"][0]["status"] is None
+
+        os.makedirs(settings.config_dir, exist_ok=True)
+        with open(settings.status_file, "w") as f:
+            json.dump({"downloads": {created["id"]: {"state": "downloading", "progress": 0.3}}}, f)
+        data = await (await client.get("/api/downloads")).json()
+        assert data["pending"][0]["status"]["progress"] == 0.3
+
+        assert (await (await client.delete(f"/api/downloads/{created['id']}")).json()) == {"cancelled": True}
+        from app import vod
+        vod.finish_request(settings.config_dir, created, error="boom")
+        assert (await client.post(f"/api/downloads/{created['id']}/retry", json={})).status == 200
+        vod.finish_request(settings.config_dir, created, error="boom")
+        assert (await client.delete(f"/api/downloads/{created['id']}")).status == 204
+        assert (await client.delete("/api/downloads/nope")).status == 404
+        assert (await client.delete("/api/downloads/..")).status in (400, 404)
+    finally:
+        await client.close()
+
+
+async def test_vod_settings(settings):
+    client = await client_for(settings)
+    try:
+        data = await (await client.put("/api/settings", json={"vod_mode": "download", "vod_speed": "1.5",
+                                                                 "vod_segment_threads": 4, "vod_parallel": 2})).json()
+        assert {k: data["settings"][k] for k in ("vod_mode", "vod_speed", "vod_segment_threads", "vod_parallel")} == {
+            "vod_mode": "download", "vod_speed": 1.5, "vod_segment_threads": 4, "vod_parallel": 2}
+        assert data["defaults"]["vod_mode"] == "realtime"
+        for bad in ({"vod_mode": "turbo"}, {"vod_speed": 0}, {"vod_speed": "x"}, {"vod_segment_threads": 11}):
+            assert (await client.put("/api/settings", json=bad)).status == 400
+    finally:
+        await client.close()

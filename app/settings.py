@@ -87,6 +87,10 @@ def load_defaults():
             "audio_normalize": env("AUDIO_NORMALIZE"),
             "video_codec": env("VIDEO_CODEC"),
             "ffmpeg_args": env("FFMPEG_ARGS"),
+            "vod_mode": env("VOD_MODE"),
+            "vod_speed": env("VOD_SPEED"),
+            "vod_segment_threads": env("VOD_SEGMENT_THREADS"),
+            "vod_parallel": env("VOD_PARALLEL"),
         })
     except ValueError as error:
         raise SettingsError(str(error)) from None

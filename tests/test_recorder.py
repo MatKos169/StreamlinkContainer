@@ -277,3 +277,83 @@ def test_recorder_prunes_done_with_retention(tmp_path):
     touch(settings.streams_file)
     advance(sup, clock, 1)                       # changed retention applies right away
     assert os.listdir(os.path.join(settings.work_dir, "done")) == ["young"]
+
+
+
+class FakeDownload:
+    created = []
+
+    def __init__(self, request, channel_outputs):
+        self.request, self.channel_outputs = request, channel_outputs
+        self.state, self.alive, self.stopped, self.cancelled = "downloading", False, False, False
+        self.title = self.channel = self.file = self.error = self.duration = None
+        self.mode, self.speed, self.progress, self.media_seconds, self.bytes = "realtime", 1.0, 0.5, 10, 100
+        import time as _t
+        self.started = _t.monotonic()
+        FakeDownload.created.append(self)
+
+    def start(self):
+        self.alive = True
+
+    def is_alive(self):
+        return self.alive
+
+    def stop(self, cancel=False):
+        self.stopped, self.cancelled = True, cancel
+
+    def join(self, timeout=None):
+        pass
+
+
+def test_supervisor_runs_vod_downloads(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    a = make_stream("alpha", output="Twitch/Alpha")
+    sup, twitch, settings, clock = setup(tmp_path, [a], overrides={"vod_parallel": 1})
+    sup.download_factory = FakeDownload
+    r1 = vod.create_request(settings.config_dir, "1")
+    r2 = vod.create_request(settings.config_dir, "2")
+    sup.step()
+    assert [d.request["id"] for d in FakeDownload.created] == [r1["id"]]        # one at a time
+    assert FakeDownload.created[0].channel_outputs == {"alpha": "Twitch/Alpha"}
+    assert status(settings)["downloads"][r1["id"]]["progress"] == 0.5
+
+    FakeDownload.created[0].state, FakeDownload.created[0].alive = "done", False
+    advance(sup, clock, 1)
+    assert [d.request["id"] for d in FakeDownload.created] == [r1["id"], r2["id"]]
+    pending, failed = vod.list_requests(settings.config_dir)
+    assert [p["id"] for p in pending] == [r2["id"]] and failed == []
+
+    vod.cancel_request(settings.config_dir, r2["id"])
+    advance(sup, clock, 1)
+    second = FakeDownload.created[1]
+    assert second.stopped and second.cancelled
+    second.state, second.alive = "cancelled", False
+    advance(sup, clock, 1)
+    assert vod.list_requests(settings.config_dir) == ([], [])
+
+
+def test_supervisor_marks_failed_downloads(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    sup, twitch, settings, clock = setup(tmp_path, [])
+    sup.download_factory = FakeDownload
+    r = vod.create_request(settings.config_dir, "7")
+    sup.step()
+    FakeDownload.created[0].state, FakeDownload.created[0].error, FakeDownload.created[0].alive = "error", "VOD not found", False
+    advance(sup, clock, 1)
+    pending, failed = vod.list_requests(settings.config_dir)
+    assert pending == [] and failed[0]["id"] == r["id"] and failed[0]["error"] == "VOD not found"
+    advance(sup, clock, 5)
+    assert len(FakeDownload.created) == 1                                        # not restarted on its own
+
+
+def test_cancel_before_start(tmp_path):
+    from app import vod
+    FakeDownload.created = []
+    sup, twitch, settings, clock = setup(tmp_path, [])
+    sup.download_factory = FakeDownload
+    r = vod.create_request(settings.config_dir, "8")
+    vod.cancel_request(settings.config_dir, r["id"])
+    sup.step()
+    assert FakeDownload.created == [] and vod.list_requests(settings.config_dir) == ([], [])

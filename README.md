@@ -61,6 +61,33 @@ Then open `http://<host>:8080`.
 Create the Twitch credentials at <https://dev.twitch.tv/console/apps> (any
 redirect URL, category "Application Integration").
 
+## VOD downloads
+
+In the web UI ("VOD-Downloads"), enter a Twitch VOD URL (`https://www.twitch.tv/videos/<id>`),
+optionally with an output folder, quality, mode and pace. The recorder downloads it into
+`/work`, then it is converted like a recording.
+
+| Mode | What happens |
+|---|---|
+| **Echtzeit** (realtime, default) | streamlink resolves the VOD (access token, playlist). The recorder then fetches the segments **one by one at playback speed × pace** (keeping ~10 s of playback time as lead), so bandwidth is spread over the VOD's length and Twitch is not hit with a burst. A 3 h VOD at pace 1 takes 3 h, at pace 4 about 45 min. |
+| **Download** | streamlink's normal behaviour: as fast as possible, with *VOD-Download-Threads* parallel segment downloads. |
+
+Why not just let streamlink pace itself: when writing to a file, streamlink fetches as fast
+as the network allows. It only appears real-time when a player reads at playback speed, and even then
+it queues up to 20 segments ahead plus a 16 MB buffer. Measured with a 2-min test VOD: download
+mode got all 48 MB in 0.2 s. Pacing only the reading still got all segments within 0.4 s. The
+own segment fetching delivered one 4 s segment per second at pace ×4.
+
+- **Metadata:** title, channel and stream start date come from Helix (with `TWITCH_CLIENT_ID`/`SECRET`), with streamlink's metadata as fallback. The file is named after the stream's start, like a recording.
+- **Output folder:** the one entered, else the folder of that channel if it is in the channel list, else the channel name.
+- **Chapters:** one chapter with the VOD's category. Helix has no endpoint for category changes within a VOD.
+- **Subscriber-only VODs** need `TWITCH_OAUTH_TOKEN`.
+- **Interrupting:** cancelling or stopping the recorder discards the partial download. A pending download starts again from the beginning after a restart. Failed downloads can be retried or removed in the UI.
+- Encrypted playlists (not used by Twitch VODs) fall back to streamlink's reader with paced reading.
+
+Requests live in `/config/downloads/` (`<id>.json` pending, `<id>.cancel` cancel marker,
+`<id>.failed.json` failed), so the recorder works through them without the web container.
+
 ## Configuration
 
 ### In the web UI ("Einstellungen")
@@ -75,6 +102,7 @@ redirect URL, category "Application Integration").
 | Keep original ("Original behalten") | `KEEP_SOURCE=true` | Keep the recorded `.ts` in `/work/done/` after converting, otherwise delete it |
 | Delete originals after ("Originale löschen nach") | `DONE_RETENTION_DAYS=0` | The recorder deletes kept originals in `/work/done/` older than this many days, hourly (0 = never). They can also be deleted by hand in the UI |
 | Normalize audio ("Lautstärke normalisieren") | `AUDIO_NORMALIZE=true` | `loudnorm=I=-14:TP=-1.5:LRA=11`, audio re-encoded as AAC 192k. Off: audio copied unchanged |
+| VOD mode / pace / threads / parallel | `VOD_MODE=realtime`, `VOD_SPEED=1`, `VOD_SEGMENT_THREADS=3`, `VOD_PARALLEL=1` | Defaults for VOD downloads (see above); mode and pace can be set per download |
 | Video codec | `VIDEO_CODEC=copy` | `copy` keeps the video as is (fast, lossless). Any ffmpeg encoder (`libx264`, `libx265`, `libsvtav1`, …) re-encodes |
 | Own ffmpeg parameters ("Eigene ffmpeg-Parameter") | `FFMPEG_ARGS=` | Extra output options, e.g. `-crf 23 -preset medium` or `-vf scale=-2:720`. They come right before the output file, so they override the options above. `-i`, `-progress`, `-y`, `-n` are rejected |
 
@@ -99,7 +127,7 @@ Credentials, access control and paths are only set by environment variables
 |---|---|---|
 | `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` | – | Twitch app credentials (recorder only, required) |
 | `TWITCH_OAUTH_TOKEN` | – | Optional browser `auth-token` cookie, so Turbo/subscriptions apply (no ads) |
-| `CHECK_INTERVAL`, `DEFAULT_QUALITY`, `RESCAN_INTERVAL`, `RESCAN_DURATION`, `FOLDER_LAYOUT`, `KEEP_SOURCE`, `AUDIO_NORMALIZE` | see above | Defaults for the UI settings |
+| `CHECK_INTERVAL`, `DEFAULT_QUALITY`, `RESCAN_INTERVAL`, `RESCAN_DURATION`, `FOLDER_LAYOUT`, `KEEP_SOURCE`, `AUDIO_NORMALIZE`, `VIDEO_CODEC`, `FFMPEG_ARGS`, `DONE_RETENTION_DAYS`, `VOD_*` | see above | Defaults for the UI settings |
 | `CONVERTER_NAME` | container hostname | Converter name shown in the UI |
 | `CONVERTER_POLL_INTERVAL` | `10` | Seconds a converter waits when the queue is empty |
 | `ALLOWED_NETWORKS` | private ranges | Who may open the web UI: comma-separated IPs/CIDRs, e.g. `10.0.0.0/24,192.168.1.20` |
@@ -162,6 +190,7 @@ python -m pytest -q
 |---|---|
 | `app/recorder.py` | Recorder entry point, `Supervisor` loop (reload config, check Twitch, start/stop recordings, write status) |
 | `app/recording.py` | `Recording` thread (streamlink → job folder), `ChapterWriter` |
+| `app/vod.py` | VOD download requests, `VodDownload` (paced segment fetching, `TsClock`) |
 | `app/jobs.py` | Work-folder queue: states, claim/heartbeat/requeue, listing |
 | `app/converter.py` | Converter entry point: chapters/metadata, ffmpeg, placing the MP4 |
 | `app/twitch.py` | Helix batch live check (`get_live`) |

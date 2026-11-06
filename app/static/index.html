@@ -28,6 +28,8 @@
   button { padding: .35rem .7rem; cursor: pointer; }
   form.add { display: grid; grid-template-columns: 2fr 2fr 1.2fr auto; gap: .5rem; margin-top: 1.5rem; align-items: end; }
   form.add label { font-size: .8rem; color: var(--muted); display: block; }
+  form.add.vod { grid-template-columns: 3fr 2fr 1.2fr 1.6fr 1fr auto; }
+  form.add select { width: 100%; padding: .35rem; }
   .state { font-weight: 600; white-space: nowrap; }
   .state.recording { color: var(--rec); }
   .state.recording::before { content: "● "; }
@@ -62,6 +64,22 @@
 </form>
 <div id="msg"></div>
 <p class="muted">Aufgenommen wird in einen Arbeitsordner. Danach wandelt ein Konverter die Aufnahme in eine MP4 mit Kapiteln (Kategorien) um und legt sie unter <code>&lt;Ausgabeordner&gt;<span id="layout-hint">/…</span>&lt;Datum Uhrzeit&gt; - &lt;Titel&gt;.mp4</code> ab.</p>
+
+<h2>VOD-Downloads</h2>
+<form class="add vod" id="vod-add">
+  <div><label for="vod-url">VOD-URL</label><input type="text" id="vod-url" placeholder="https://www.twitch.tv/videos/123456789" required></div>
+  <div><label for="vod-output">Ausgabeordner</label><input type="text" id="vod-output" placeholder="leer = Ordner des Kanals"></div>
+  <div><label for="vod-quality">Qualität</label><input type="text" id="vod-quality" placeholder="Standard"></div>
+  <div><label for="vod-mode">Modus</label>
+    <select id="vod-mode"><option value="">Standard (Einstellungen)</option><option value="realtime">Echtzeit</option><option value="download">Download (volle Geschwindigkeit)</option></select></div>
+  <div><label for="vod-speed">Tempo (Echtzeit)</label><input type="number" id="vod-speed" min="0.25" max="20" step="0.25" placeholder="Standard"></div>
+  <button type="submit">Herunterladen</button>
+</form>
+<div class="small">Echtzeit lädt das VOD im Tempo der Wiedergabe (× Tempo) und spart so Bandbreite und Last bei Twitch. Download lädt so schnell wie möglich. Danach wird das VOD wie eine Aufnahme umgewandelt.</div>
+<table>
+  <thead><tr><th>Status</th><th>VOD</th><th>Fortschritt</th><th></th></tr></thead>
+  <tbody id="vods"><tr><td colspan="4" class="muted">Lade …</td></tr></tbody>
+</table>
 
 <h2>Verarbeitung</h2>
 <div class="cards" id="cards"></div>
@@ -106,6 +124,15 @@
     <label for="video_codec">Video-Codec</label><input type="text" id="video_codec" list="codecs" required>
     <span class="small"><code>copy</code> übernimmt das Video unverändert (schnell, verlustfrei). Ein Codec wie <code>libx264</code>, <code>libx265</code> oder <code>libsvtav1</code> kodiert neu – deutlich langsamer, Qualität/Größe über eigene Parameter steuern (z.B. <code>-crf 23 -preset medium</code>).</span>
     <datalist id="codecs"><option value="copy"><option value="libx264"><option value="libx265"><option value="libsvtav1"><option value="libvpx-vp9"></datalist>
+    <label for="vod_mode">VOD-Modus</label>
+    <select id="vod_mode"><option value="realtime">Echtzeit</option><option value="download">Download (volle Geschwindigkeit)</option></select>
+    <span class="small">Standard für VOD-Downloads. Echtzeit schont Bandbreite und Twitch, dauert aber so lange wie das VOD (÷ Tempo).</span>
+    <label for="vod_speed">VOD-Tempo (Echtzeit)</label><input type="number" id="vod_speed" min="0.25" max="20" step="0.25" required>
+    <span class="small">1 = Wiedergabegeschwindigkeit, 2 = doppelt so schnell.</span>
+    <label for="vod_segment_threads">VOD-Download-Threads</label><input type="number" id="vod_segment_threads" required>
+    <span class="small">Parallele Segment-Downloads im Download-Modus (streamlink <code>stream-segment-threads</code>).</span>
+    <label for="vod_parallel">Gleichzeitige VOD-Downloads</label><input type="number" id="vod_parallel" required>
+    <span class="small">Weitere VODs warten, bis einer fertig ist.</span>
     <label for="ffmpeg_args">Eigene ffmpeg-Parameter</label><input type="text" id="ffmpeg_args" placeholder="z.B. -crf 23 -preset medium">
     <span class="small">Werden direkt vor der Ausgabedatei angehängt und überschreiben damit die Optionen oben (z.B. <code>-c:a copy</code>, <code>-vf scale=-2:720</code>). Nicht erlaubt: <code>-i</code>, <code>-progress</code>, <code>-y</code>, <code>-n</code>. Gilt für neue Aufnahmen und für „Erneut versuchen“.</span>
     <div class="actions"><button type="submit">Speichern</button><button type="button" id="settings-reset">Auf Standard (Umgebungsvariablen) zurücksetzen</button></div>
@@ -203,7 +230,7 @@ document.getElementById("add").addEventListener("submit", async (ev) => {
   try { await api("POST", "/api/streams", body); ev.target.reset(); showError(); await load(); } catch (e) { showError(e); }
 });
 
-const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "done_retention_days", "audio_normalize", "video_codec", "ffmpeg_args"];
+const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "done_retention_days", "audio_normalize", "video_codec", "ffmpeg_args", "vod_mode", "vod_speed", "vod_segment_threads", "vod_parallel"];
 const LAYOUT_HINT = { none: "/", year: "/&lt;Jahr&gt;/", year_month: "/&lt;Jahr&gt;/&lt;Monat&gt;/", date: "/&lt;Datum&gt;/", output_year_month: "-&lt;Jahr&gt;/&lt;Monat&gt;/" };
 
 function fillSettings(data) {
@@ -321,6 +348,63 @@ document.getElementById("done-delete-all").addEventListener("click", async () =>
   try { await api("DELETE", "/api/done"); loadJobs(); } catch (e) { showError(e); }
 });
 
+const VOD_STATES = { starting: "startet", downloading: "lädt", done: "fertig", error: "Fehler", cancelled: "abgebrochen", stopped: "angehalten" };
+
+function renderVods(data) {
+  const body = document.getElementById("vods");
+  body.replaceChildren();
+  if (!data.pending.length && !data.failed.length) {
+    body.append(el("tr", {}, el("td", { colSpan: 4, class: "muted" }, "Keine VOD-Downloads.")));
+    return;
+  }
+  for (const d of data.pending) {
+    const st = d.status;
+    const mode = (st && st.mode) || d.mode;
+    const label = d.cancel ? "wird abgebrochen" : st ? (VOD_STATES[st.state] || st.state) : "wartet";
+    const progress = el("td", {});
+    if (st && st.state === "downloading") {
+      const p = st.progress;
+      if (p != null) progress.append(el("progress", { max: 1, value: p }));
+      const rate = st.elapsed_seconds ? st.media_seconds / st.elapsed_seconds : 0;
+      const eta = p != null && rate > 0 ? (st.duration - st.media_seconds) / rate : null;
+      progress.append(el("div", { class: "small" },
+        `${p != null ? Math.round(p * 100) + " % · " : ""}${formatDuration(st.media_seconds)}${st.duration ? " von " + formatDuration(st.duration) : ""} · ${formatSize(st.bytes)}`
+        + (rate ? ` · ${rate.toFixed(1)}× Echtzeit` : "") + (eta != null ? ` · Rest ca. ${formatDuration(eta)}` : "")));
+    }
+    body.append(el("tr", {},
+      el("td", {}, el("div", { class: `state ${st && st.state === "downloading" ? "recording" : "waiting"}` }, label),
+        el("div", { class: "small" }, mode === "download" ? "Download" : mode === "realtime" ? `Echtzeit${d.speed || (st && st.speed) ? " ×" + (d.speed || st.speed) : ""}` : "Standard-Modus")),
+      el("td", {}, el("div", {}, (st && st.title) || d.url), el("div", { class: "small" }, (st && st.file) || d.output || "")),
+      progress,
+      el("td", {}, d.cancel ? null : el("button", { onclick: async () => {
+        if (!confirm("Download abbrechen? Bereits Geladenes wird verworfen.")) return;
+        try { await api("DELETE", `/api/downloads/${d.id}`); loadVods(); } catch (e) { showError(e); }
+      } }, "Abbrechen"))));
+  }
+  for (const d of data.failed) {
+    body.append(el("tr", {},
+      el("td", {}, el("div", { class: "state error" }, "fehlgeschlagen"), el("div", { class: "small" }, d.error || "")),
+      el("td", {}, el("div", {}, d.url), el("div", { class: "small" }, d.output || "")),
+      el("td", {}),
+      el("td", {},
+        el("button", { onclick: async () => { try { await api("POST", `/api/downloads/${d.id}/retry`, {}); loadVods(); } catch (e) { showError(e); } } }, "Erneut versuchen"), " ",
+        el("button", { onclick: async () => { try { await api("DELETE", `/api/downloads/${d.id}`); loadVods(); } catch (e) { showError(e); } } }, "Entfernen"))));
+  }
+}
+
+async function loadVods() {
+  try { renderVods(await api("GET", "/api/downloads")); } catch (e) { showError(e); }
+}
+
+document.getElementById("vod-add").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const speed = document.getElementById("vod-speed").value;
+  const body = { url: document.getElementById("vod-url").value, output: document.getElementById("vod-output").value,
+    quality: document.getElementById("vod-quality").value, mode: document.getElementById("vod-mode").value || null,
+    speed: speed ? Number(speed) : null };
+  try { await api("POST", "/api/downloads", body); ev.target.reset(); showError(); loadVods(); } catch (e) { showError(e); }
+});
+
 async function loadJobs() {
   try { renderOverview(await api("GET", "/api/overview")); } catch (e) { showError(e); }
 }
@@ -351,8 +435,10 @@ document.getElementById("settings-reset").addEventListener("click", () =>
 loadSettings();
 load();
 loadJobs();
+loadVods();
 setInterval(() => {
   loadJobs();
+  loadVods();
   if (!document.activeElement || document.activeElement.tagName !== "INPUT" || document.activeElement.type === "checkbox") load();
 }, 5000);
 </script>

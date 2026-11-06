@@ -76,7 +76,11 @@ OPTION_LIMITS = {
     "rescan_interval": (5, 600),
     "rescan_duration": (0, 3600),   # 0 disables the quick re-check after a stream ends
     "done_retention_days": (0, 3650),   # 0 keeps originals in /work/done forever
+    "vod_segment_threads": (1, 10),
+    "vod_parallel": (1, 5),
 }
+VOD_MODES = ("realtime", "download")
+VOD_SPEED_LIMITS = (0.25, 20.0)
 
 
 @dataclass
@@ -92,6 +96,10 @@ class Options:
     audio_normalize: bool = True        # loudnorm to -14 LUFS, audio re-encoded as AAC 192k
     video_codec: str = "copy"           # ffmpeg -c:v value; "copy" = no re-encoding
     ffmpeg_args: str = ""               # extra ffmpeg output options, appended last (they win)
+    vod_mode: str = "realtime"          # realtime: paced to playback speed; download: as fast as possible
+    vod_speed: float = 1.0              # realtime pace (1.0 = playback speed)
+    vod_segment_threads: int = 3        # parallel segment downloads in download mode
+    vod_parallel: int = 1               # VOD downloads at the same time
 
     def merged(self, overrides):
         """Return a copy with validated overrides applied (None values are ignored)."""
@@ -112,6 +120,16 @@ class Options:
                     raise ValueError(f"folder_layout must be one of {', '.join(FOLDER_LAYOUTS)}")
             elif key in ("keep_source", "audio_normalize"):
                 value = _parse_bool(value, key)
+            elif key == "vod_mode":
+                if value not in VOD_MODES:
+                    raise ValueError(f"vod_mode must be one of {', '.join(VOD_MODES)}")
+            elif key == "vod_speed":
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    raise ValueError("vod_speed must be a number") from None
+                if isinstance(value, bool) or not VOD_SPEED_LIMITS[0] <= value <= VOD_SPEED_LIMITS[1]:
+                    raise ValueError(f"vod_speed must be between {VOD_SPEED_LIMITS[0]:g} and {VOD_SPEED_LIMITS[1]:g}")
             elif key == "video_codec":
                 value = str(value).strip() or "copy"
                 if not _CODEC_RE.match(value):

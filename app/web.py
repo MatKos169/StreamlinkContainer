@@ -14,7 +14,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from . import jobs
+from . import jobs, vod
 from .naming import FOLDER_LAYOUTS
 from .recording import conversion_settings
 from .settings import SettingsError, load_settings
@@ -215,6 +215,58 @@ async def delete_done(request):
     return web.json_response({"deleted": deleted})
 
 
+def _read_status(app):
+    try:
+        with open(app[SETTINGS_KEY].status_file, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+async def list_downloads(request):
+    config_dir = request.app[SETTINGS_KEY].config_dir
+    pending, failed = vod.list_requests(config_dir)
+    running = (_read_status(request.app) or {}).get("downloads") or {}
+    for item in pending:
+        item["status"] = running.get(item["id"])
+    return web.json_response({"pending": pending, "failed": failed})
+
+
+async def create_download(request):
+    data = await _read_json(request)
+    if not isinstance(data, dict):
+        return _error(400, "download must be an object")
+    try:
+        created = vod.create_request(request.app[SETTINGS_KEY].config_dir, data.get("url"), output=data.get("output"),
+                                     quality=data.get("quality"), mode=data.get("mode"), speed=data.get("speed"))
+    except ValueError as error:
+        return _error(400, str(error))
+    return web.json_response(created, status=201)
+
+
+async def delete_download(request):
+    """Cancel a pending/running download, or remove a failed one."""
+    config_dir = request.app[SETTINGS_KEY].config_dir
+    try:
+        if vod.cancel_request(config_dir, request.match_info["id"]):
+            return web.json_response({"cancelled": True})
+        if vod.delete_failed(config_dir, request.match_info["id"]):
+            return web.Response(status=204)
+    except ValueError as error:
+        return _error(400, str(error))
+    return _error(404, "unknown download")
+
+
+async def retry_download(request):
+    await _read_json(request)
+    try:
+        if vod.retry_failed(request.app[SETTINGS_KEY].config_dir, request.match_info["id"]):
+            return web.json_response({"retried": True})
+    except ValueError as error:
+        return _error(400, str(error))
+    return _error(404, "no failed download with this id")
+
+
 async def get_status(request):
     try:
         with open(request.app[SETTINGS_KEY].status_file, encoding="utf-8") as f:
@@ -241,6 +293,10 @@ def create_app(settings):
         web.get("/api/overview", get_overview),
         web.post("/api/jobs/{id}/retry", retry_job),
         web.delete("/api/jobs/{id}", delete_job),
+        web.get("/api/downloads", list_downloads),
+        web.post("/api/downloads", create_download),
+        web.delete("/api/downloads/{id}", delete_download),
+        web.post("/api/downloads/{id}/retry", retry_download),
         web.delete("/api/done", delete_done),
         web.delete("/api/done/{id}", delete_done),
     ])
