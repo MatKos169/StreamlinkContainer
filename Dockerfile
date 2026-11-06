@@ -1,39 +1,31 @@
-# Base image with Python
-FROM python:3.14.1-alpine3.21@sha256:fd8407cacb1028c803566276ae25eb7c2a00fbaa210a0a5670994f6866e29278 as base
+# One image for both services: the recorder (default) and the web UI (python -m app.web).
+FROM python:3.14.1-alpine3.21@sha256:fd8407cacb1028c803566276ae25eb7c2a00fbaa210a0a5670994f6866e29278 AS base
 WORKDIR /app
 
-# Builder stage to install build dependencies and Python packages
-FROM base as builder
-RUN apk add --no-cache gcc musl-dev \
-    && pip install --upgrade pip
+FROM base AS builder
+RUN apk add --no-cache gcc musl-dev
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt 
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Runner stage for the final image
-FROM base as runner
+FROM base AS runner
+# tzdata: file names use local time (set TZ, e.g. Europe/Berlin).
+RUN apk add --no-cache tzdata
 COPY --from=builder /install /usr/local
-COPY streamlink-recorder.py .
-COPY twitch_manager.py .
-COPY streamlink_manager.py .
-COPY notification_manager.py .
+COPY app ./app
 
-# Uninstall pip, setuptools, and ensurepip
 RUN python -m pip uninstall -y pip setuptools \
-    && rm -rf /usr/local/lib/python3.*/ensurepip
+    && rm -rf /usr/local/lib/python3.*/ensurepip \
+    && mkdir -p /config /recordings
 
-# Run as a non-root user that matches the compose/NFS owner (1027, group users=100).
-# /app stays root-owned and read-only; only /app/download (a volume) is writable.
-RUN adduser -D -H -u 1027 -G users -s /sbin/nologin streamlink \
-    && mkdir -p /app/download \
-    && chown 1027:100 /app/download
-
-# Works with a read-only root filesystem: no bytecode writes, and the streamlink
-# cache goes under /tmp (tmpfs/emptyDir) instead of $HOME.
+# Works with a read-only root filesystem: no bytecode writes, streamlink cache under /tmp.
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    XDG_CACHE_HOME=/tmp/.cache
+    PYTHONUNBUFFERED=1 \
+    XDG_CACHE_HOME=/tmp/.cache \
+    CONFIG_DIR=/config \
+    RECORDINGS_DIR=/recordings
 
-# Numeric so Kubernetes runAsNonRoot can verify it.
+# Override with `user:` in compose to match the owner of your volumes.
 USER 1027:100
 
-# Set the entrypoint without expanding secrets into process arguments.
-ENTRYPOINT ["python", "./streamlink-recorder.py"]
+EXPOSE 8080
+CMD ["python", "-m", "app.recorder"]

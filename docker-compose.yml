@@ -1,51 +1,52 @@
+# Two containers sharing ./config:
+#   recorder - polls Twitch and records all enabled channels (runs on its own)
+#   web      - UI to add/remove channels; can be stopped without affecting recordings
 x-common: &common
-    # Non-root, matching the owner of /volume1/twitch. Only the volume and /tmp are writable.
-    user: 1027:100
-    read_only: true
-    tmpfs:
+  image: streamlink-recorder:local
+  build: .
+  user: "${PUID:-1027}:${PGID:-100}"
+  read_only: true
+  tmpfs:
     - /tmp
-    cap_drop:
+  cap_drop:
     - ALL
-    security_opt:
+  security_opt:
     - no-new-privileges:true
-    logging:
-      driver: json-file
-    restart: unless-stopped
-    volumes:
-    - /volume1/twitch:/app/download
+  restart: unless-stopped
 
 services:
-  streamlink:
+  recorder:
     <<: *common
-    image: ghcr.io/liofal/streamlink:5.0.0
+    container_name: streamlink-recorder
+    env_file:
+      - default.env
+      - clientid.env
+    volumes:
+      - ${CONFIG_PATH:-./config}:/config
+      - ${RECORDINGS_PATH:-./recordings}:/recordings
+    # Give running recordings time to close their files on `docker compose down`.
+    stop_grace_period: 1m
+    healthcheck:
+      # status.json is rewritten on every check; stale means the loop is stuck.
+      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(time.time()-os.path.getmtime('/config/status.json') > 600)"]
+      interval: 1m
+      start_period: 2m
     deploy:
       resources:
         limits:
-          # Same as the Helm chart: Python + streamlink buffers need about 100-150M while recording.
-          memory: 512M
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file: 
-        # - ../global.env    
-        - default.env
-        - clientid.env
-    container_name: streamlink_${TWITCH}
-    environment:
-      - user=${TWITCH}
-      - quality=best
+          memory: 1G
 
-  ffmpeg:
+  web:
     <<: *common
-    image: ghcr.io/liofal/ffmpeg:1.0.1
+    container_name: streamlink-web
+    command: ["python", "-m", "app.web"]
+    env_file:
+      - default.env
+    volumes:
+      - ${CONFIG_PATH:-./config}:/config
+    ports:
+      - "${WEB_PORT:-8080}:8080"
     deploy:
       resources:
         limits:
-          # Recommended minimum for large TS to MP4 remuxing.
-          memory: 512M
-    container_name: ffmpeg_converter
-    environment:
-      - SLEEPTIME=600
-      - WORKDIR=/app/download
-    
-    restart: unless-stopped
+          memory: 128M

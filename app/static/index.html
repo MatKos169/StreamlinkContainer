@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stream Recorder</title>
+<style>
+  :root { color-scheme: light dark; --muted: #888; --ok: #2e9d4f; --rec: #d33; --warn: #c78a00; }
+  body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 1100px; padding: 1.5rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  .banner { padding: .6rem .8rem; border-radius: 6px; margin: .75rem 0; background: #c78a0022; border: 1px solid var(--warn); }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+  th, td { text-align: left; padding: .5rem .4rem; border-bottom: 1px solid #8884; vertical-align: top; }
+  th { font-size: .8rem; text-transform: uppercase; color: var(--muted); }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: .35rem; }
+  button { padding: .35rem .7rem; cursor: pointer; }
+  form.add { display: grid; grid-template-columns: 2fr 2fr 1.2fr auto; gap: .5rem; margin-top: 1.5rem; align-items: end; }
+  form.add label { font-size: .8rem; color: var(--muted); display: block; }
+  .state { font-weight: 600; white-space: nowrap; }
+  .state.recording { color: var(--rec); }
+  .state.recording::before { content: "● "; }
+  .state.live { color: var(--ok); }
+  .state.error, .state.waiting { color: var(--warn); }
+  .state.offline, .state.disabled, .state.unknown { color: var(--muted); }
+  .small { font-size: .8rem; color: var(--muted); word-break: break-all; }
+  #msg { color: var(--rec); min-height: 1.2rem; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>Stream Recorder</h1>
+<div class="muted" id="recorder">Recorder-Status wird geladen …</div>
+<div id="banners"></div>
+
+<table>
+  <thead><tr><th>Kanal</th><th>Ausgabeordner</th><th>Qualität</th><th>Status</th><th>Aktiv</th><th></th></tr></thead>
+  <tbody id="rows"><tr><td colspan="6" class="muted">Lade …</td></tr></tbody>
+</table>
+
+<form class="add" id="add">
+  <div><label for="channel">Kanal oder URL</label><input type="text" id="channel" placeholder="https://www.twitch.tv/name" required></div>
+  <div><label for="output">Ausgabeordner (relativ zu /recordings)</label><input type="text" id="output" placeholder="leer = Kanalname"></div>
+  <div><label for="quality">Qualität</label><input type="text" id="quality" placeholder="Standard, z.B. 1080p60,best"></div>
+  <button type="submit">Hinzufügen</button>
+</form>
+<div id="msg"></div>
+<p class="muted">Aufnahmen landen unter <code>&lt;Ausgabeordner&gt;/&lt;Datum&gt;/&lt;Uhrzeit&gt; - &lt;Titel&gt;.ts</code>, daneben eine <code>.chapters.csv</code> mit den Kategorie-Wechseln.</p>
+
+<script>
+const STATES = { recording: "nimmt auf", live: "live", offline: "offline", waiting: "wartet auf Stream",
+  starting: "startet", error: "Fehler", disabled: "deaktiviert", unknown: "unbekannt", finished: "fertig" };
+let streams = [], status = null;
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    let text = res.statusText;
+    try { text = (await res.json()).error || text; } catch (e) {}
+    throw new Error(text);
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k.startsWith("on")) node.addEventListener(k.slice(2), v); else if (k === "class") node.className = v; else node[k] = v;
+  }
+  for (const c of children) if (c != null) node.append(c);
+  return node;
+}
+
+function showError(e) { document.getElementById("msg").textContent = e ? e.message : ""; }
+
+function editable(stream, field, placeholder) {
+  return el("input", { type: "text", value: stream[field], placeholder,
+    onchange: async (ev) => {
+      try { await api("PUT", `/api/streams/${stream.id}`, { [field]: ev.target.value }); showError(); await load(); }
+      catch (e) { showError(e); ev.target.value = stream[field]; }
+    } });
+}
+
+function statusCell(stream) {
+  const s = status && status.streams ? status.streams[stream.id] : null;
+  if (!s) return el("td", { class: "small" }, "noch nicht geprüft");
+  const cell = el("td", {}, el("div", { class: `state ${s.state}` }, STATES[s.state] || s.state));
+  if (s.category) cell.append(el("div", { class: "small" }, `${s.category} – ${s.title || ""}`));
+  if (s.file) cell.append(el("div", { class: "small" }, s.file));
+  if (s.error) cell.append(el("div", { class: "small" }, s.error));
+  if (!s.file && s.last && s.last.file) cell.append(el("div", { class: "small" }, `zuletzt: ${s.last.file}`));
+  return cell;
+}
+
+function render() {
+  const rows = document.getElementById("rows");
+  rows.replaceChildren();
+  if (!streams.length) rows.append(el("tr", {}, el("td", { colSpan: 6, class: "muted" }, "Noch keine Kanäle eingetragen.")));
+  for (const s of streams) {
+    rows.append(el("tr", {},
+      el("td", {}, el("a", { href: `https://www.twitch.tv/${s.channel}`, target: "_blank", rel: "noopener" }, s.channel)),
+      el("td", {}, editable(s, "output", s.channel)),
+      el("td", {}, editable(s, "quality", "Standard")),
+      statusCell(s),
+      el("td", {}, el("input", { type: "checkbox", checked: s.enabled, onchange: async (ev) => {
+        try { await api("PUT", `/api/streams/${s.id}`, { enabled: ev.target.checked }); await load(); } catch (e) { showError(e); }
+      } })),
+      el("td", {}, el("button", { onclick: async () => {
+        if (!confirm(`${s.channel} entfernen? Eine laufende Aufnahme wird beendet.`)) return;
+        try { await api("DELETE", `/api/streams/${s.id}`); await load(); } catch (e) { showError(e); }
+      } }, "Entfernen"))));
+  }
+  const info = document.getElementById("recorder"), banners = document.getElementById("banners");
+  banners.replaceChildren();
+  if (!status) { info.textContent = "Recorder hat noch keinen Status geschrieben (läuft der Recorder-Container?)."; return; }
+  const age = (Date.now() - Date.parse(status.updated_at)) / 1000;
+  const stale = age > status.check_interval * 3 + 30;
+  info.textContent = `Recorder zuletzt aktiv: ${new Date(status.updated_at).toLocaleString()} · Prüfintervall ${status.check_interval}s` + (stale ? " · RECORDER REAGIERT NICHT" : "");
+  if (status.twitch_error) banners.append(el("div", { class: "banner" }, `Twitch-Abfrage fehlgeschlagen: ${status.twitch_error}`));
+  if (status.config_error) banners.append(el("div", { class: "banner" }, `streams.json ungültig: ${status.config_error}`));
+}
+
+async function load() {
+  try {
+    streams = (await api("GET", "/api/streams")).streams;
+    status = (await api("GET", "/api/status")).status;
+    render();
+  } catch (e) { showError(e); }
+}
+
+document.getElementById("add").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const body = { channel: channel.value, output: output.value, quality: quality.value };
+  try { await api("POST", "/api/streams", body); ev.target.reset(); showError(); await load(); } catch (e) { showError(e); }
+});
+
+load();
+setInterval(() => { if (!document.activeElement || document.activeElement.tagName !== "INPUT" || document.activeElement.type === "checkbox") load(); }, 5000);
+</script>
+</body>
+</html>

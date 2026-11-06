@@ -1,403 +1,107 @@
-# ⚠️ Disclaimer ⚠️
-We have renamed the master branch to main for clarity and to follow best practices. Please reconfigure your branch origin with the following commands:
+# Streamlink Recorder
 
-# Context
-I was in the search for a twitch stream ripper that would monitor and save streams to my twitch synology folder to watch on plex while I'm unable to watch online.
+Records Twitch streams automatically. You add channels in a small web UI; a
+recorder container checks them regularly and records every channel that is
+live. Each channel has its own output folder. Next to every video it writes a
+CSV with the stream's category changes, for turning them into chapters later.
 
-I could not find an existing image that would respond exactly to my needs so I combined what I could find from few existing projects (see credits here below)
+Fork of [liofal/streamlink](https://github.com/liofal/streamlink), reduced to Twitch-only
+recording with a multi-channel web UI.
 
-I decided to build it automatically on docker hub to access from my swarm nodes, when I saw many downloads, I decided to document a bit more the project, for my personnal experience and to encourage reusability
+## Containers
 
-Questions, suggestions, requests, reach me out on [![alt text][1.1]][1]
+| Service | What it does | Needs |
+|---|---|---|
+| `recorder` | Checks all enabled channels every `CHECK_INTERVAL` seconds (one Twitch API call for up to 100 channels) and records live ones, one thread per stream. | Twitch app credentials, `/config`, `/recordings` |
+| `web` | Web UI on port 8080 to add, edit, disable and remove channels, and shows the recorder's status. | `/config` |
 
-I'm also interested with new projects for automation of daily popular tasks, don't hesitate, I'm waiting for new ideas
+Both share `/config/streams.json` (the channel list, written by the web UI) and
+`/config/status.json` (written by the recorder). **The recorder does not need the
+web container.** You can stop `web`, and recordings keep running. The recorder
+picks up changes to `streams.json` on its next check, without a restart.
 
+## Setup
 
-```sh
-git branch -m master main
-git fetch origin
-git branch -u origin/main main
-git remote set-head origin -a
+```bash
+cp clientid.env.example clientid.env      # add TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET
+mkdir -p config recordings && sudo chown 1027:100 config recordings   # or set PUID/PGID
+docker compose up -d --build
 ```
 
-# Notes
+Then open `http://<host>:8080`.
 
-## 4.0.0
-Update dependency streamlink to v8.0.0
-Removed deprecated `twitch-disable-hosting` and `twitch-disable-ads` options (handled automatically by Streamlink 8.x)
+Create the Twitch credentials at <https://dev.twitch.tv/console/apps> (any
+redirect URL, category "Application Integration").
 
-## 3.3.4
-Update dependency streamlink to v7.1.3
+## Configuration
 
-## 3.3.3 
-Update dependency streamlink to v7.1.2
-Fix filename sanitization to handle reserved characters
+Global settings are environment variables (`default.env`, `clientid.env`, or the
+shell for the compose variables):
 
-## 3.3.2
-Refactor filename generation and add support for dynamic stream extensions in StreamlinkManager, in reference to improvement suggestion by [thematuu](https://github.com/thematuu) in [PR20](https://github.com/liofal/streamlink/pull/20)
+| Variable | Default | Meaning |
+|---|---|---|
+| `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET` | – | Twitch app credentials (recorder only, required) |
+| `TWITCH_OAUTH_TOKEN` | – | Optional browser `auth-token` cookie, so Turbo/subscriptions apply (no ads) |
+| `CHECK_INTERVAL` | `60` | Seconds between checks (minimum 10) |
+| `DEFAULT_QUALITY` | `best` | Quality when a channel has none, e.g. `1080p60,720p60,best` (first match wins) |
+| `ALLOWED_NETWORKS` | private ranges | Who may open the web UI: comma-separated IPs/CIDRs, e.g. `10.0.0.0/24,192.168.1.20` |
+| `TZ` | `Europe/Berlin` (in `default.env`) | Time zone for file names |
+| `PUID`, `PGID` | `1027`, `100` | User/group the containers run as (owner of the volumes) |
+| `CONFIG_PATH`, `RECORDINGS_PATH` | `./config`, `./recordings` | Host folders for the volumes |
+| `WEB_PORT` | `8080` | Host port of the web UI |
 
-Add sidecar container for ffmpeg converstion to mp4 of .ts files.
+**Note on `ALLOWED_NETWORKS`:** the web container sees the client's real IP for
+requests from other machines. Requests to `localhost` on the Docker host arrive
+from the Docker bridge gateway (for example `172.19.0.1`). Add that address if you
+open the UI on the host itself. Behind a reverse proxy, allow the proxy's IP.
 
-## 3.3.1
-Bump up versions dependencies.
-* requests==2.32.3
-* streamlink==7.1.1
-* twitchAPI==4.4.0
+Per-channel settings (in the UI):
 
-And activate renovate for automatic dependencies upgrade, be aware of that setup and use automatic trigger of "latest" dockerimage replacement.
+- **Channel**: login or URL (`https://www.twitch.tv/name`)
+- **Output folder**: relative to `/recordings`, may contain subfolders (`Twitch/Name`). Empty means the channel name. `..` is rejected.
+- **Quality**: overrides `DEFAULT_QUALITY`
+- **Active**: unchecking it stops a running recording
 
-## 3.2.0
-Added support for optional OAuth token parameter to authenticate Twitch API requests.
+## Output
 
-## 3.1.0 - 3.1.1
-Automatic build and deployment pipeline to both ghcr and docker hub.
-With tag versioning and latest tagging.
-Remove broken support for oauth twitch token, will soon migrate to new model
-
-## 3.0.0
-Introduced Twitch API integration for improved stream monitoring.
-
-Added support for notification via Telegram, as requested in [issue #1](https://github.com/liofal/streamlink/issues/1).
-
-Refactored the notification system to support multiple platforms, including Slack and Telegram.
-
-Major code refactor for better modularity and readability, including the use of classes for Twitch, Streamlink, and notification management.
-
-## 2.1.0
-Migration to ghcr.io, please adapt your links!
-
-github actions automatic build with kaniko
-
-Adapt for helm deployment
-
-## 2.0.2 - 2.0.3
-solved bug of env args being ignored [#10](https://github.com/liofal/streamlink/issues/10)
-thanks to [too-many-bees](https://github.com/too-many-bees) for raising it up.
-
-## 2.0.1
-solved bug of missing loop issue [#6](https://github.com/liofal/streamlink/issues/6)
-thanks to [too-many-bees](https://github.com/too-many-bees) for raising it up.
-
-## 2.0
-major refactoring and improvements to the code, respect standards and best practices 
-
-parse title stream and add to filename
-
-added contribution from [zerobell-lee](https://github.com/zerobell-lee) to disable ads by authenticating as a twitch user 
-
-## 1.9.0 - 1.9.1
-Move to python 3.11
-Various improvements to project, cleanup and dependencies management
-
-## 1.8.0 - 1.8.5
-Full rework with support of OAuth2 token management
-Review of helix twitch operation and simplification of the flow
-
-Upgrade python python:3.9.1-alpine3.12
-
-# Credits
-Originally inspired from the work of the people here below.
-Thanks to those people.
-
-https://github.com/Neolysion/Twitch-Recorder/blob/master/check.py
-
-https://www.junian.net/2017/01/how-to-record-twitch-streams.html
-
-I cleaned up and adapted following my requirements and added a slack integration
-
-All rights are reserved to the original script owners, it has been now mostly reworked from scratch nevertheless will remove code if requested.
-
-# Quality
-Quality is specified within the stream, any twitch quality specified existing for the stream can be defined
-
-Keywords can always be used
-* best
-* worst
-
-# Variables
-
-Environment variables are primarily used for Docker deployments. For Kubernetes/Helm deployments, configuration is managed with `values.yaml`, ConfigMaps, and Kubernetes Secrets.
-
-Existing lowercase variable names remain supported for compatibility. New deployments may use the uppercase aliases below.
-
-| Purpose | Existing name | Preferred alias |
-| --- | --- | --- |
-| Twitch user to monitor | `user` | `TWITCH_USER` |
-| Check interval in seconds (minimum 1; under 15 logs a rate-limit warning) | `timer` | `TIMER` |
-| Recording quality | `quality` | `STREAM_QUALITY` |
-| Twitch Helix client ID | `clientid` | `TWITCH_CLIENT_ID` |
-| Twitch Helix client secret | `clientsecret` | `TWITCH_CLIENT_SECRET` |
-| Streamlink Twitch playback auth token | `oauthtoken` | `TWITCH_AUTH_TOKEN` or `TWITCH_OAUTH_TOKEN` |
-| Slack webhook path/ID | `slackid` | `SLACK_ID` |
-| Telegram bot token | `telegrambottoken` | `TELEGRAM_BOT_TOKEN` |
-| Telegram chat ID | `telegramchatid` | `TELEGRAM_CHAT_ID` |
-| Comma-separated Twitch game IDs to record | `gamelist` | `GAME_LIST` |
-| Consecutive Twitch API failures before a notification is sent (default `5`) | `twitcherrorthreshold` | `TWITCH_ERROR_NOTIFY_THRESHOLD` |
-| Retries (5s, 10s, 20s, 40s, 60s backoff) when a live stream can't be started, before falling back to `timer` (default `5`, `0` disables) | `recordretries` | `RECORD_RETRIES` |
-
-## Twitch credentials and playback auth
-
-This project uses two different Twitch credential types:
-
-1. **Twitch Developer Portal credentials**: `clientid` / `clientsecret` or `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`.
-   These are used by this app to call Twitch Helix and check whether the configured streamer is live.
-2. **Streamlink Twitch playback auth token**: `oauthtoken`, `TWITCH_AUTH_TOKEN`, or `TWITCH_OAUTH_TOKEN`.
-   This is the `auth-token` browser cookie from a logged-in Twitch web session, passed to Streamlink as `Authorization=OAuth <token>` for playback requests.
-
-The playback auth token is **not** the same thing as a normal Twitch Developer Portal OAuth refresh-token flow. Streamlink's Twitch playback authentication currently relies on the browser `auth-token` cookie.
-
-The playback token is optional. Omit it when unauthenticated recording of public streams works for your use case. Configure it only when the Twitch stream/VOD playback you need requires authenticated browser access.
-
-### Twitch auth-token security caveats
-
-Treat the browser `auth-token` like an account secret:
-
-- Do not paste it into GitHub issues, chat, screenshots, or logs.
-- Do not commit real values to this repository.
-- Prefer env files, Docker secrets, or Kubernetes Secrets over inline terminal commands.
-- Logging out of Twitch may not immediately revoke previously issued tokens.
-- If a token may have leaked, use Twitch account security settings, password rotation, and "sign out everywhere" style controls to invalidate active sessions where available.
-
-### Getting or renewing the playback auth token
-
-1. Log in to Twitch in a browser as the account you want Streamlink to use for playback.
-2. Open the browser developer tools and inspect cookies for `twitch.tv`.
-3. Copy the value of the `auth-token` cookie only.
-4. Store it as `oauthtoken`, `TWITCH_AUTH_TOKEN`, or `TWITCH_OAUTH_TOKEN` in your deployment secret store.
-5. Restart or roll out the recorder so it receives the new value.
-
-Avoid pasting real tokens directly into shell commands on shared systems because they may be saved in shell history or terminal logs.
-
-### Invalid playback auth-token behavior
-
-When `oauthtoken`, `TWITCH_AUTH_TOKEN`, or `TWITCH_OAUTH_TOKEN` is configured, the recorder validates the Twitch playback token at startup and periodically while running.
-
-The default invalid-token policy is `exit`:
-
-```env
-TWITCH_AUTH_INVALID_TOKEN_POLICY=exit
+```
+/recordings/<output folder>/<YYYY-MM-DD>/<HH-MM-SS> - <title>.ts
+/recordings/<output folder>/<YYYY-MM-DD>/<HH-MM-SS> - <title>.chapters.csv
 ```
 
-If Twitch confirms the playback token is invalid, the recorder logs a clear error, sends Slack/Telegram notification if configured, and exits non-zero. In Kubernetes this can surface as a restarting pod or `CrashLoopBackOff`; renew the token in the Secret and restart or roll out the deployment.
+- While recording, the video is written as `.part` and renamed when the stream ends.
+- If a recording breaks off with an error, the data is kept as `.ts.incomplete`.
+- On `docker compose down`/SIGTERM, running recordings are closed cleanly and kept as `.ts`.
+- If the stream is still live after a recording ended (e.g. a dropout), a new file is started on the next check.
 
-To keep the process alive instead, set:
+The chapters CSV gets one row at the start and one per category change. It is
+updated while recording:
 
-```env
-TWITCH_AUTH_INVALID_TOKEN_POLICY=notify
+```csv
+offset_seconds,offset,timestamp_utc,category_id,category,title
+0.0,00:00:00,2026-11-06T18:21:54Z,26936,Music,lofi hip hop radio
+1834.2,00:30:34,2026-11-06T18:52:28Z,509658,Just Chatting,new title
 ```
 
-In `notify` mode, the recorder logs/notifies the invalid token, keeps checking stream status, and skips recording attempts while the token remains known invalid.
+The offset counts from the recording start. Category changes are detected on the next
+check, so they are up to `CHECK_INTERVAL` seconds late.
 
-Validation interval defaults to one hour:
+## Development
 
-```env
-TWITCH_AUTH_VALIDATION_INTERVAL=3600
+Tests run with pytest; external services (Twitch, streamlink) are mocked:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
-Unknown validation failures, such as temporary network errors, do not cause the recorder to exit. Only confirmed invalid-token errors apply the invalid-token policy.
-
-Known limitations:
-
-- Validation runs between recordings, so it pauses for the whole length of a recording. An invalid token is noticed after the recording ends.
-- If Twitch rate-limits (HTTP 429) a stream check, the library waits for the limit to reset and the check is read as offline. The next check corrects it.
-
-# Docker
-
-For Docker, prefer an env file instead of inline `-e` flags for secrets:
-
-```env
-# clientid.env - keep this file out of git
-TWITCH_CLIENT_ID=xxxxxxxx
-TWITCH_CLIENT_SECRET=xxxxxxxx
-TWITCH_AUTH_TOKEN=xxxxxxxx # optional browser auth-token for Streamlink playback
-SLACK_ID=xxxxxxxxx
-TELEGRAM_BOT_TOKEN=xxxxxxxxx
-TELEGRAM_CHAT_ID=xxxxxxxxx
-```
-
-```sh
-docker run -d --rm \
-  --env-file clientid.env \
-  -v twitch:/app/download \
-  -e TIMER=360 \
-  -e TWITCH_USER=heromarine \
-  -e STREAM_QUALITY=best \
-  ghcr.io/liofal/streamlink:latest
-```
-
-Existing lowercase env files continue to work:
-
-```env
-clientid=xxxxxxxx
-clientsecret=xxxxxxxx
-oauthtoken=xxxxxxxx
-```
-
-# Compose
-
-## Startup
-To run a test service
-
-    ./docker-compose -f dockerimages/streamlink/docker-compose.yml up -d test
-
-## clientid.env
-Specify credentials using the `clientid.env.example` file as a template. Keep real `clientid.env` files out of git.
-
-To renew a Twitch playback auth token in Docker Compose:
-
-1. Update `oauthtoken`, `TWITCH_AUTH_TOKEN`, or `TWITCH_OAUTH_TOKEN` in your local env file.
-2. Restart the recorder container with `docker compose up -d` or your normal deployment command.
-3. Do not paste the token into issue reports or logs.
-
-## default.env
-you can specify the default for compose here
-
-# Volume
-    /app/download 
-
-_**Warning:** The folder does not exist in the container and need te be created as a volume in order to be accessed from outside your container, you should map it if you want to access it_
-
-## Running as non-root (5.0.0 and later)
-
-The image runs as user `1027`, group `100` (`users`), not root. Docker Compose and the Helm chart also use a read-only root filesystem, drop all capabilities and block privilege escalation. Only the download volume and `/tmp` are writable.
-
-**Before upgrading**, make the download folder writable for `1027:100`. Folders and files written by older, root-run containers are usually owned by root:
-
-```sh
-# On the NAS / host, for each streamer folder
-chown -R 1027:100 /volume1/twitch/<streamer>
-```
-
-- **Kubernetes:** pre-create the NFS folder of every new streamer (`<nfs.path>/<streamer.name>`) owned by `1027:100` before you install the chart. Otherwise kubelet creates the `subPath` folder as root and the recorder cannot write to it. The user and group are set by `podSecurityContext` (`runAsUser`, `runAsGroup`, `fsGroup`) in the chart values. `ffmpeg.workdir` must be `/app/download`.
-- **Docker:** a new named volume inherits the right owner from the image. For an existing volume or bind mount, `chown` it as above, or run with `--user <uid>:<gid>` matching its owner. `--user 0:0` restores the old root behavior, but it is not recommended.
-
-## FFmpeg Conversion
-
-The `docker-compose.yml` file includes an FFmpeg service that automatically converts TS container files to MP4. The FFmpeg service is configured to run periodically and process files in the `/app/download` directory.
-
-- The `SLEEPTIME` environment variable defines the interval (in seconds) between conversion checks. By default, it is set to 600 seconds (10 minutes).
-- The `WORKDIR` environment variable specifies the directory where the TS files are located and where the converted MP4 files will be saved.
-- The compose example uses `ghcr.io/liofal/ffmpeg:1.0.1`. This image supersedes the older `ffmpeg6` image name.
-
-For large recordings, give the FFmpeg container at least 512M of memory or remove the memory limit. Very low limits such as 256M can cause FFmpeg to be killed while remuxing large `.ts` files.
-
-If conversion fails, the FFmpeg image removes partial `.mp4` output and renames the source file from `video.ts` to `video.ts.failed`. This prevents restart policies from retrying the same failing file indefinitely.
-
-## Shutdown and failed recordings
-
-On SIGTERM or SIGINT (`docker stop`, pod termination, Ctrl-C) the recorder stops the current recording, closes the file, renames it to its final `.ts`/`.mp4` name and exits. A stop sends no "done" notification.
-
-If a recording fails midway (network stall, disk full), the data is kept as `<name>.ts.incomplete` (or `.mp4.incomplete`) instead of a complete-looking file. The FFmpeg sidecar only converts `*.ts`, so it skips these. Rename the file to `.ts` to convert it anyway. A recording that failed before writing any data leaves no file.
-
-To customize the FFmpeg conversion settings, you can modify the environment variables in the `docker-compose.yml` file.
-
-# Kubernetes Deployment with Helm
-
-To deploy this project on Kubernetes using Helm, follow these steps:
-
-1. **Create the Namespace:**
-    ```sh
-    kubectl create namespace streamlink
-    ```
-
-2. **Add the Helm Repository:**
-    ```sh
-    helm repo add streamlink https://github.com/liofal/streamlink/kube/charts
-    helm repo update
-    ```
-
-3. **Prepare the Shared Secret:**
-    Before installing the chart, you must create a single, shared Kubernetes Secret containing the necessary API tokens and IDs for all your streamlink instances. The chart includes an example manifest at `kube/charts/secret.example.yaml`.
-
-    Kubernetes Secret `data` values are base64 encoded, but base64 is **not encryption**. Do not commit real Secret manifests to git.
-
-    For a copy/paste-safe workflow that avoids writing secrets into shell history, put real values in a local env file that is outside git, restrict its permissions, and generate the Secret from that file:
-
-    ```sh
-    # streamlink-secrets.env is gitignored; never commit it
-    install -m 600 /dev/null ./streamlink-secrets.env
-    $EDITOR ./streamlink-secrets.env
-    kubectl create secret generic streamlink-secrets \
-      --from-env-file=./streamlink-secrets.env \
-      --namespace streamlink \
-      --dry-run=client \
-      -o yaml | kubectl apply -f -
-    ```
-
-    Example `streamlink-secrets.env` keys:
-
-    ```env
-    clientid=xxxxxxxx
-    clientsecret=xxxxxxxx
-    oauthtoken=xxxxxxxx # optional browser auth-token for Streamlink playback
-    slackid=xxxxxxxxx
-    telegrambottoken=xxxxxxxxx
-    telegramchatid=xxxxxxxxx
-    ```
-
-    To renew the Twitch playback auth token in Kubernetes:
-
-    1. Update `oauthtoken` in your local secret env file.
-    2. Re-run the `kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -` command above.
-    3. Roll out or restart the recorder deployment so the pod receives the updated Secret value.
-
-    If you prefer a manifest workflow, copy `kube/charts/secret.example.yaml` outside the repository, replace the placeholders, apply it with `kubectl apply -f`, and keep the real manifest out of git.
-
-4. **Customize Your `values.yaml`:**
-    Create a `values.yaml` file (or use an existing one) for each streamlink instance you want to deploy. Ensure the `secretName` field is set to the name of the shared Secret you created in the previous step (e.g., `streamlink-secrets`). Here is an example configuration for one instance:
-    ```yaml
-    image:
-      streamlink:
-        repository: ghcr.io/liofal
-        name: streamlink
-        tag: 3.3.4
-        pullPolicy: Always
-      ffmpeg: 
-        repository: ghcr.io/liofal
-        name: ffmpeg
-        tag: 1.0.1
-        pullPolicy: Always
-
-    streamer:
-      name: "<name_here>"
-      twitchName: "<twitch_name_here>"
-      quality: "best"
-      timer: 120
-
-    # Name of the Kubernetes Secret containing sensitive tokens.
-    # This should point to the single, shared Secret created in Step 3.
-    secretName: "streamlink-secrets" # Default name for the shared secret
-
-    ffmpeg:
-      sleeptime: "<sleeptime_value>"
-      workdir: "<workdir_value>"
-
-    nfs:
-      server: <server_ip_here>
-      path: /<volume>/<folder>
-    ```
-
-5. **Install the Helm Chart:**
-    ```sh
-    helm install my-streamlink streamlink/streamlink -n streamlink -f /path/to/your/values.yaml
-    ```
-    Replace `/path/to/your/values.yaml` with the path to your customized `values.yaml` file.
-
-6. **Upgrade the Helm Release:**
-    If you need to apply changes to your deployment, ensure your Secret is up-to-date, update your `values.yaml` file if necessary, and run:
-    ```sh
-    helm upgrade my-streamlink streamlink/streamlink -n streamlink -f /path/to/your/values.yaml
-    ```
-
-    The Deployment uses the `Recreate` strategy, so an upgrade stops the old pod before starting the new one; two recorders never write to the same folder. Changing the streamer config (`user`, `quality`, `timer`) also restarts the pod.
-
-    **Resources and liveness:** both containers have memory requests and limits (`resources` in `values.yaml`; ffmpeg gets 1Gi, see #40). The recorder touches `/tmp/streamlink-recorder.heartbeat` on every check and every 30 seconds while recording. A liveness probe restarts it when that file is older than `max(timer, 600) + 300` seconds. Override this with `livenessProbe.maxHeartbeatAgeSeconds`, or disable the probe with `livenessProbe.enabled: false`.
-
-7. **Uninstall the Helm Release:**
-    To remove the deployment (this does not remove the Secret):
-    ```sh
-    helm uninstall my-streamlink -n streamlink
-    ```
-
-[1.1]: http://i.imgur.com/tXSoThF.png (twitter icon with padding)
-[1]: http://www.twitter.com/liofal
+| Path | Role |
+|---|---|
+| `app/recorder.py` | Recorder entry point, `Supervisor` loop (reload config, check Twitch, start/stop recordings, write status) |
+| `app/recording.py` | `Recording` thread (streamlink → file), `ChapterWriter` |
+| `app/twitch.py` | Helix batch live check (`get_live`) |
+| `app/web.py`, `app/static/index.html` | Web UI and JSON API, IP allowlist |
+| `app/streams.py` | `streams.json` model, validation, atomic writes |
+| `app/naming.py` | Safe file/folder names |
+| `app/settings.py` | Environment settings |

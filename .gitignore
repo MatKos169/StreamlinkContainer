@@ -11,3 +11,6 @@ streamlink-secrets.env
 *.env
 !*.env.example
 !default.env
+/config/
+/recordings/
+.venv/
