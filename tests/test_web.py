@@ -122,8 +122,10 @@ async def test_jobs_api(settings):
         assert [j["id"] for j in data["failed"]] == ["j1", "j2"]
         assert (await client.post("/api/jobs/j1/retry", data="",
                                   headers={"Content-Type": "application/x-www-form-urlencoded"})).status == 415
+        await client.put("/api/settings", json={"video_codec": "libx265", "ffmpeg_args": "-crf 28"})
         assert (await client.post("/api/jobs/j1/retry", json={})).status == 200
-        assert os.path.isdir(os.path.join(settings.work_dir, "queue", "j1"))
+        retried = jobs.read_job(os.path.join(settings.work_dir, "queue", "j1"))
+        assert (retried["video_codec"], retried["ffmpeg_args"], retried["error"]) == ("libx265", "-crf 28", None)
         assert (await client.post("/api/jobs/j1/retry", json={})).status == 404   # only failed jobs
         assert (await client.delete("/api/jobs/j2")).status == 204
         assert not os.path.exists(os.path.join(settings.work_dir, "failed", "j2"))
@@ -141,5 +143,41 @@ async def test_settings_output_options(settings):
             "year", False, False)
         assert "output_year_month" in data["folder_layouts"]
         assert (await client.put("/api/settings", json={"folder_layout": "weird"})).status == 400
+    finally:
+        await client.close()
+
+
+
+async def test_overview_api(settings):
+    from app import jobs
+    jobs.worker_heartbeat(settings.work_dir, "conv1", "idle")
+    jobs.record_completed(settings.work_dir, "j1", {"file": "a.mp4"})
+    client = await client_for(settings)
+    try:
+        data = await (await client.get("/api/overview")).json()
+        assert data["counts"]["workers_online"] == 1 and data["counts"]["completed"] == 1
+        assert data["counts"]["open"] == 0 and data["jobs"]["queue"] == []
+    finally:
+        await client.close()
+
+
+
+async def test_done_api(settings):
+    from app import jobs
+    for job_id in ("d1", "d2", "d3"):
+        path = os.path.join(settings.work_dir, "done", job_id)
+        os.makedirs(path)
+        jobs.write_job(path, {"channel": "a", "done_ts": 1.0})
+    client = await client_for(settings)
+    try:
+        data = await (await client.get("/api/overview")).json()
+        assert data["counts"]["done"] == 3 and [d["id"] for d in data["done"]] == ["d1", "d2", "d3"]
+        assert (await (await client.delete("/api/done/d1")).json()) == {"deleted": 1}
+        assert (await client.delete("/api/done/d1")).status == 404
+        assert (await client.delete("/api/done/..")).status in (400, 404)
+        assert (await (await client.delete("/api/done")).json()) == {"deleted": 2}
+        assert os.listdir(os.path.join(settings.work_dir, "done")) == []
+        r = await client.put("/api/settings", json={"done_retention_days": 3651})
+        assert r.status == 400 and "days" in (await r.json())["error"]
     finally:
         await client.close()

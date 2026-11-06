@@ -16,6 +16,7 @@ from aiohttp import web
 
 from . import jobs
 from .naming import FOLDER_LAYOUTS
+from .recording import conversion_settings
 from .settings import SettingsError, load_settings
 from .streams import OPTION_LIMITS, StreamConfig, load_config, save_config
 
@@ -166,6 +167,10 @@ async def list_jobs(request):
     return web.json_response(jobs.list_jobs(request.app[SETTINGS_KEY].work_dir))
 
 
+async def get_overview(request):
+    return web.json_response(jobs.overview(request.app[SETTINGS_KEY].work_dir))
+
+
 def _failed_job(request):
     job_id = request.match_info["id"]
     if not jobs.valid_job_id(job_id):
@@ -179,6 +184,15 @@ def _failed_job(request):
 async def retry_job(request):
     await _read_json(request)  # JSON only: blocks cross-site form posts
     work, job_id = _failed_job(request)
+    # Retry with the current conversion settings, so a fix in the UI applies.
+    try:
+        options = load_config(_path(request.app)).options(request.app[SETTINGS_KEY].defaults)
+    except ValueError as error:
+        return _error(500, str(error))
+    path = jobs.job_dir(work, "failed", job_id)
+    job = jobs.read_job(path)
+    job.update(conversion_settings(options), error=None)
+    jobs.write_job(path, job)
     if jobs.move(work, job_id, "failed", "queue") is None:
         return _error(404, "no failed job with this id")
     return web.json_response({"id": job_id, "state": "queue"})
@@ -188,6 +202,17 @@ async def delete_job(request):
     work, job_id = _failed_job(request)
     jobs.remove(jobs.job_dir(work, "failed", job_id))
     return web.Response(status=204)
+
+
+async def delete_done(request):
+    """DELETE /api/done/{id} deletes one kept original, DELETE /api/done all of them."""
+    job_id = request.match_info.get("id")
+    if job_id is not None and not jobs.valid_job_id(job_id):
+        raise web.HTTPBadRequest(text="invalid job id")
+    deleted = jobs.delete_done(request.app[SETTINGS_KEY].work_dir, job_id)
+    if job_id is not None and not deleted:
+        return _error(404, "no kept original with this id")
+    return web.json_response({"deleted": deleted})
 
 
 async def get_status(request):
@@ -213,8 +238,11 @@ def create_app(settings):
         web.get("/api/settings", get_settings),
         web.put("/api/settings", update_settings),
         web.get("/api/jobs", list_jobs),
+        web.get("/api/overview", get_overview),
         web.post("/api/jobs/{id}/retry", retry_job),
         web.delete("/api/jobs/{id}", delete_job),
+        web.delete("/api/done", delete_done),
+        web.delete("/api/done/{id}", delete_done),
     ])
     return app
 

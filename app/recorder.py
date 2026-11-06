@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 SHUTDOWN_TIMEOUT = 30
 STEP_SECONDS = 1
 STATUS_HEARTBEAT_SECONDS = 30
+PRUNE_SECONDS = 3600
 
 
 def _iso(ts=None):
@@ -58,6 +59,7 @@ class Supervisor:
         self._dirty = True
         self._last_status = None
         self._rec_signature = ()
+        self._next_prune = 0.0
 
     # -- config ---------------------------------------------------------
 
@@ -84,6 +86,8 @@ class Supervisor:
             return
         self.config_error = None
         self.streams = config.streams
+        if options.done_retention_days != self.options.done_retention_days:
+            self._next_prune = 0.0  # apply a changed retention right away
         if options.check_interval != self.options.check_interval:
             self.next_check = min(self.next_check, self.clock() + options.check_interval)
         self.options = options
@@ -166,12 +170,28 @@ class Supervisor:
         if now >= self.next_check:
             self._check_twitch(wanted, now)
         self._run_rescans(wanted, now)
+        self._prune_done(now)
         signature = tuple((sid, rec.state, rec.file) for sid, rec in sorted(self.recordings.items()))
         if signature != self._rec_signature:
             self._rec_signature = signature
             self._dirty = True
         if self._dirty or self._last_status is None or now - self._last_status >= STATUS_HEARTBEAT_SECONDS:
             self.write_status(now)
+
+    def _prune_done(self, now):
+        """Delete kept originals older than done_retention_days (hourly; works without the web UI)."""
+        if now < self._next_prune:
+            return
+        self._next_prune = now + PRUNE_SECONDS
+        if not self.options.done_retention_days:
+            return
+        try:
+            pruned = jobs.prune_done(self.settings.work_dir, self.options.done_retention_days)
+        except OSError as error:
+            logger.warning("Cleaning up %s/done failed: %s", self.settings.work_dir, type(error).__name__)
+            return
+        if pruned:
+            logger.info("Deleted %d original(s) older than %d days from done/", len(pruned), self.options.done_retention_days)
 
     # -- status ---------------------------------------------------------
 

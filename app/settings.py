@@ -83,7 +83,10 @@ def load_defaults():
             "rescan_duration": env("RESCAN_DURATION"),
             "folder_layout": env("FOLDER_LAYOUT"),
             "keep_source": env("KEEP_SOURCE"),
+            "done_retention_days": env("DONE_RETENTION_DAYS"),
             "audio_normalize": env("AUDIO_NORMALIZE"),
+            "video_codec": env("VIDEO_CODEC"),
+            "ffmpeg_args": env("FFMPEG_ARGS"),
         })
     except ValueError as error:
         raise SettingsError(str(error)) from None

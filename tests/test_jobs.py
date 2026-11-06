@@ -106,3 +106,62 @@ def test_valid_job_id():
     assert jobs.valid_job_id("20261106-201500-a-abc123")
     for bad in ("", ".", "..", "a/b", "a\\b"):
         assert not jobs.valid_job_id(bad)
+
+
+def test_workers_online_offline(tmp_path):
+    work = str(tmp_path)
+    jobs.worker_heartbeat(work, "a", "idle", poll_seconds=10)
+    jobs.worker_heartbeat(work, "b/../x", "busy", job_id="j", progress=0.5, poll_seconds=30)
+    later = jobs.read_json(os.path.join(work, "workers", "a.json"))["heartbeat"] + 70
+    workers = {w["name"]: w for w in jobs.list_workers(work, now=later)}
+    assert workers["a"]["online"] is False            # 70s > max(60, 3*10)
+    assert workers["b/../x"]["online"] is True        # 70s <= 3*30
+    assert sorted(os.listdir(os.path.join(work, "workers"))) == ["a.json", "b_.._x.json"]
+    jobs.remove_worker(work, "a")
+    assert [w["name"] for w in jobs.list_workers(work)] == ["b/../x"]
+
+
+def test_history_and_overview(tmp_path):
+    work = str(tmp_path)
+    for i in range(7):
+        jobs.record_completed(work, f"j{i}", {"file": f"f{i}.mp4"})
+    make_job(work, "queue", "q1", name="video.ts")
+    make_job(work, "queue", "q2", name="video.ts")
+    make_job(work, "recording", "r1")
+    make_job(work, "failed", "f1", name="video.ts")
+    jobs.claim_next(work, "conv")                     # q1 -> converting
+    claim_path = os.path.join(work, "converting", "q1", jobs.CLAIM_FILE)
+    claim = json.load(open(claim_path))
+    claim.update(progress=0.25, started=claim["heartbeat"] - 100)
+    json.dump(claim, open(claim_path, "w"))
+    jobs.worker_heartbeat(work, "conv", "busy", job_id="q1", progress=0.25)
+    ov = jobs.overview(work, now=claim["heartbeat"])
+    assert ov["counts"] == {"open": 1, "running": 1, "recording": 1, "failed": 1, "completed": 7,
+                            "workers_online": 1, "workers_total": 1, "done": 0, "done_size": 0}
+    assert ov["running"][0]["converter"] == "conv"
+    assert ov["running"][0]["elapsed_seconds"] == 100 and ov["running"][0]["eta_seconds"] == 300
+    assert len(ov["recent"]) == 5 and ov["recent"][0]["file"] == "f6.mp4"
+
+
+def test_history_is_pruned(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, "HISTORY_KEEP", 3)
+    for i in range(5):
+        jobs.record_completed(str(tmp_path), f"j{i}", {})
+    assert sorted(os.listdir(tmp_path / "history")) == ["j2.json", "j3.json", "j4.json"]
+
+
+def test_done_list_delete_prune(tmp_path):
+    work = str(tmp_path)
+    make_job(work, "done", "old", name="video.ts", meta={"channel": "a", "done_ts": 1000.0, "converted_to": "a/x.mp4"})
+    make_job(work, "done", "new", name="video.ts", meta={"channel": "b", "done_ts": 1000.0 + 9 * 86400})
+    make_job(work, "done", "third", name="video.ts", meta={"channel": "c", "done_ts": 1000.0 + 9 * 86400})
+    entries = {e["id"]: e for e in jobs.list_done(work)}
+    assert entries["old"]["converted_to"] == "a/x.mp4" and entries["old"]["size"] > 0
+    now = 1000.0 + 10 * 86400
+    assert jobs.prune_done(work, 0, now=now) == []            # 0 = keep forever
+    assert jobs.prune_done(work, 7, now=now) == ["old"]
+    assert jobs.delete_done(work, "../queue") == 0
+    assert jobs.delete_done(work, "new") == 1
+    assert [e["id"] for e in jobs.list_done(work)] == ["third"]
+    assert jobs.delete_done(work) == 1
+    assert jobs.list_done(work) == []

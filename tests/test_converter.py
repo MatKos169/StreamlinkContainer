@@ -69,6 +69,13 @@ def test_ffmpeg_command_normalize_switch(tmp_path):
     assert "loudnorm=I=-14:TP=-1.5:LRA=11" not in copy and copy[copy.index("-c:a") + 1] == "copy"
 
 
+def test_ffmpeg_command_codec_and_extra_args_last(tmp_path):
+    conv = Converter(make_settings(tmp_path), "c")
+    cmd = conv.ffmpeg_command("in.ts", "m", "out.mp4", video_codec="libx265", extra_args=["-crf", "28", "-c:a", "copy"])
+    assert cmd[cmd.index("-c:v") + 1] == "libx265"
+    assert cmd[-5:] == ["-crf", "28", "-c:a", "copy", "out.mp4"]   # extra args right before the output
+
+
 def queue_job(settings, job_id, meta, video_bytes=None, video_src=None, chapters=None):
     path = os.path.join(settings.work_dir, "queue", job_id)
     os.makedirs(path)
@@ -116,7 +123,8 @@ def probe(path):
 def test_real_conversion(tmp_path, sample_ts, normalize, keep):
     settings = make_settings(tmp_path)
     queue_job(settings, "j1", {"destination": "chan-2026/11/2026-11-06 20-15-00 - T.mp4",
-                               "audio_normalize": normalize, "keep_source": keep, "started_at": "2026-11-06T20:15:00+01:00"},
+                               "audio_normalize": normalize, "keep_source": keep, "started_at": "2026-11-06T20:15:00+01:00",
+                               "video_codec": "copy", "ffmpeg_args": ""},
               video_src=sample_ts, chapters=[(0, "Just Chatting"), (5.0, "Elden Ring")])
     conv = Converter(settings, "c")
     job_id, path = jobs.claim_next(settings.work_dir, "c")
@@ -138,6 +146,8 @@ def test_real_conversion(tmp_path, sample_ts, normalize, keep):
     assert os.listdir(os.path.join(settings.work_dir, "converting")) == []
     done_dir = os.path.join(settings.work_dir, "done")
     done = os.listdir(done_dir) if os.path.isdir(done_dir) else []
+    count, recent = jobs.list_completed(settings.work_dir)
+    assert count == 1 and recent[0]["file"].endswith("T.mp4") and recent[0]["chapters"] == 2
     if keep:
         assert done == ["j1"]
         assert jobs.read_job(os.path.join(settings.work_dir, "done", "j1"))["converted_to"].endswith("T.mp4")
@@ -156,3 +166,57 @@ def test_stop_releases_job(tmp_path, sample_ts):
     assert os.listdir(os.path.join(settings.work_dir, "queue")) == ["j1"]
     assert sorted(os.listdir(os.path.join(settings.work_dir, "queue", "j1"))) == ["job.json", "video.ts"]
     assert not os.path.exists(os.path.join(settings.recordings_dir, "chan", "x.mp4"))
+
+
+def test_real_reencode_with_extra_args(tmp_path, sample_ts):
+    settings = make_settings(tmp_path)
+    queue_job(settings, "j1", {"destination": "chan/x.mp4", "audio_normalize": False, "video_codec": "libx264",
+                               "ffmpeg_args": "-preset ultrafast -crf 35 -vf scale=-2:120"},
+              video_src=sample_ts, chapters=[(0, "A"), (4.0, "B")])
+    conv = Converter(settings, "c")
+    job_id, path = jobs.claim_next(settings.work_dir, "c")
+    conv.process(job_id, path, threading.Event())
+    out = os.path.join(settings.recordings_dir, "chan/x.mp4")
+    assert os.path.exists(out), [jobs.read_job(os.path.join(settings.work_dir, "failed", j)) for j in os.listdir(os.path.join(settings.work_dir, "failed"))]
+    info = probe(out)
+    video = next(s for s in info["streams"] if s["codec_type"] == "video")
+    assert (video["codec_name"], video["height"]) == ("h264", 120)
+    assert [c["tags"]["title"] for c in info["chapters"]] == ["A", "B"]
+
+
+def test_bad_extra_args_fail_the_job(tmp_path, sample_ts):
+    settings = make_settings(tmp_path)
+    queue_job(settings, "j1", {"destination": "chan/x.mp4", "ffmpeg_args": "-crf 23 -nonsense_option 1"},
+              video_src=sample_ts)
+    conv = Converter(settings, "c")
+    job_id, path = jobs.claim_next(settings.work_dir, "c")
+    conv.process(job_id, path, threading.Event())
+    meta = jobs.read_job(os.path.join(settings.work_dir, "failed", "j1"))
+    assert meta["error"].startswith("ffmpeg exit code")
+
+
+def test_blocked_args_in_job_fail_without_running_ffmpeg(tmp_path):
+    settings = make_settings(tmp_path)
+    queue_job(settings, "j1", {"destination": "chan/x.mp4", "ffmpeg_args": "-i /etc/passwd"})
+    conv = Converter(settings, "c", ffprobe="true", ffmpeg="false")
+    conv.probe_duration = lambda video: 10.0
+    job_id, path = jobs.claim_next(settings.work_dir, "c")
+    conv.process(job_id, path, threading.Event())
+    assert "-i" in jobs.read_job(os.path.join(settings.work_dir, "failed", "j1"))["error"]
+
+
+def test_worker_registers_and_unregisters(tmp_path):
+    settings = make_settings(tmp_path)
+    conv = Converter(settings, "worker-1", poll_seconds=1)
+    stop = threading.Event()
+    t = threading.Thread(target=conv.run, args=(stop,))
+    t.start()
+    for _ in range(50):
+        workers = jobs.list_workers(settings.work_dir)
+        if workers:
+            break
+        threading.Event().wait(0.05)
+    assert [(w["name"], w["state"], w["online"]) for w in workers] == [("worker-1", "idle", True)]
+    stop.set()
+    t.join(15)
+    assert jobs.list_workers(settings.work_dir) == []

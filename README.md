@@ -15,7 +15,7 @@ Fork of [liofal/streamlink](https://github.com/liofal/streamlink); the converter
 |---|---|---|
 | `recorder` | Checks all enabled channels every *check interval* (one Twitch API call for up to 100 channels) and records live ones, one thread per stream, into `/work/recording/`. Finished recordings go to `/work/queue/`. | `/config`, `/work` |
 | `converter` | Takes jobs from `/work/queue/`, writes an MP4 with chapters and moves it to `/recordings/...`. Any number can run, also on other hosts. | `/work`, `/recordings` |
-| `web` | Web UI (port 8080): channels, settings, recorder status, processing queue (retry/delete failed jobs). | `/config`, `/work` |
+| `web` | Web UI (port 8080): channels, settings, recorder status, processing overview (jobs open/running/completed/failed, converters online, progress with remaining time, kept originals), retry/delete failed jobs, delete kept originals. | `/config`, `/work` |
 
 **The recorder does not need the web container or a converter.** If no converter
 runs, recordings wait in `/work/queue/` and are converted later.
@@ -28,6 +28,8 @@ runs, recordings wait in `/work/queue/` and are converted later.
 /work/converting/<job>/   claimed by a converter (claim.json: name, heartbeat, progress)
 /work/failed/<job>/       conversion failed; "Erneut versuchen"/"Löschen" in the UI
 /work/done/<job>/         original .ts kept after conversion ("Original behalten")
+/work/workers/<name>.json converter heartbeats ("Worker online": seen within max(60 s, 3 x poll interval))
+/work/history/<job>.json  one record per finished conversion ("Jobs abgeschlossen", last 1000 kept)
 ```
 
 ### Several converters / other hosts
@@ -71,9 +73,14 @@ redirect URL, category "Application Integration").
 | Re-check for | `RESCAN_DURATION=120` | … for this long (0–3600 s, 0 = off) |
 | Subfolders ("Unterordner") | `FOLDER_LAYOUT=output_year_month` | `output_year_month`: `<folder>-2026/11/` (like the old ffmpeg container), `year_month`: `<folder>/2026/11/`, `year`, `date` (`<folder>/2026-11-06/`), `none` |
 | Keep original ("Original behalten") | `KEEP_SOURCE=true` | Keep the recorded `.ts` in `/work/done/` after converting, otherwise delete it |
-| Normalize audio ("Lautstärke normalisieren") | `AUDIO_NORMALIZE=true` | `loudnorm=I=-14:TP=-1.5:LRA=11`, audio re-encoded as AAC 192k. Off: audio copied unchanged. Video is always copied |
+| Delete originals after ("Originale löschen nach") | `DONE_RETENTION_DAYS=0` | The recorder deletes kept originals in `/work/done/` older than this many days, hourly (0 = never). They can also be deleted by hand in the UI |
+| Normalize audio ("Lautstärke normalisieren") | `AUDIO_NORMALIZE=true` | `loudnorm=I=-14:TP=-1.5:LRA=11`, audio re-encoded as AAC 192k. Off: audio copied unchanged |
+| Video codec | `VIDEO_CODEC=copy` | `copy` keeps the video as is (fast, lossless). Any ffmpeg encoder (`libx264`, `libx265`, `libsvtav1`, …) re-encodes |
+| Own ffmpeg parameters ("Eigene ffmpeg-Parameter") | `FFMPEG_ARGS=` | Extra output options, e.g. `-crf 23 -preset medium` or `-vf scale=-2:720`. They come right before the output file, so they override the options above. `-i`, `-progress`, `-y`, `-n` are rejected |
 
-Values saved in the UI are stored in `streams.json` and override the env values. "Reset"
+Conversion settings (codec, parameters, normalization, keep original) are stored in
+each job when its recording starts; "Erneut versuchen" on a failed job applies the
+current settings. Values saved in the UI are stored in `streams.json` and override the env values. "Reset"
 goes back to the env values. The recorder applies changes within a second.
 
 **Quick re-check after a stream ends:** when a recording ends (stream over or

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.streams import Config, Options, StreamConfig, load_config, parse_channel, save_config
+from app.streams import Config, Options, StreamConfig, load_config, parse_channel, parse_ffmpeg_args, save_config
 
 
 @pytest.mark.parametrize("value", [
@@ -77,5 +77,23 @@ def test_options_merged_validates_and_converts():
     {"rescan_interval": "x"}, {"rescan_interval": True}, {"default_quality": "a;b"}, {"nope": 1},
 ])
 def test_options_merged_rejects(bad):
+    with pytest.raises(ValueError):
+        Options().merged(bad)
+
+
+def test_video_codec_and_ffmpeg_args():
+    merged = Options().merged({"video_codec": " libx265 ", "ffmpeg_args": " -crf 23  -vf 'scale=-2:720' "})
+    assert merged.video_codec == "libx265"
+    assert parse_ffmpeg_args(merged.ffmpeg_args) == ["-crf", "23", "-vf", "scale=-2:720"]
+    assert Options().merged({"video_codec": ""}).video_codec == "copy"
+    assert Options().video_codec == "copy" and Options().ffmpeg_args == ""
+
+
+@pytest.mark.parametrize("bad", [
+    {"video_codec": "libx264; rm"}, {"video_codec": "a b"},
+    {"ffmpeg_args": "-i /etc/passwd"}, {"ffmpeg_args": "-progress x"}, {"ffmpeg_args": "-y"},
+    {"ffmpeg_args": "'unclosed"}, {"ffmpeg_args": "x" * 501},
+])
+def test_video_codec_and_ffmpeg_args_rejected(bad):
     with pytest.raises(ValueError):
         Options().merged(bad)

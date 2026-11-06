@@ -260,3 +260,20 @@ def test_shutdown_stops_all(tmp_path):
     sup.step()
     sup.shutdown()
     assert FakeRecording.created[0].stopped
+
+
+def test_recorder_prunes_done_with_retention(tmp_path):
+    import time as _time
+    from app import jobs
+    a = make_stream("alpha")
+    sup, twitch, settings, clock = setup(tmp_path, [a])
+    for job_id, age_days in (("old", 40), ("young", 2)):
+        path = os.path.join(settings.work_dir, "done", job_id)
+        os.makedirs(path)
+        jobs.write_job(path, {"done_ts": _time.time() - age_days * 86400})
+    sup.step()                                   # retention 0: nothing deleted
+    assert sorted(os.listdir(os.path.join(settings.work_dir, "done"))) == ["old", "young"]
+    save_streams(settings.streams_file, [a], {"done_retention_days": 30})
+    touch(settings.streams_file)
+    advance(sup, clock, 1)                       # changed retention applies right away
+    assert os.listdir(os.path.join(settings.work_dir, "done")) == ["young"]

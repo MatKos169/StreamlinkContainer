@@ -10,6 +10,15 @@
   h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
   h2 { font-size: 1.1rem; margin: 2rem 0 0; }
   progress { width: 8rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .6rem; margin: .8rem 0; }
+  .card { border: 1px solid #8884; border-radius: 6px; padding: .6rem .8rem; }
+  .card .num { font-size: 1.6rem; font-weight: 700; }
+  .card .label { font-size: .8rem; color: var(--muted); }
+  .card.bad .num { color: var(--rec); }
+  .card.good .num { color: var(--ok); }
+  .run { display: grid; grid-template-columns: 1fr 14rem 9rem; gap: .6rem; align-items: center; padding: .35rem 0; border-bottom: 1px solid #8882; }
+  .run progress { width: 100%; height: 1rem; }
+  #running:empty { display: none; }
   .muted { color: var(--muted); font-size: .9rem; }
   .banner { padding: .6rem .8rem; border-radius: 6px; margin: .75rem 0; background: #c78a0022; border: 1px solid var(--warn); }
   table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
@@ -55,6 +64,14 @@
 <p class="muted">Aufgenommen wird in einen Arbeitsordner. Danach wandelt ein Konverter die Aufnahme in eine MP4 mit Kapiteln (Kategorien) um und legt sie unter <code>&lt;Ausgabeordner&gt;<span id="layout-hint">/…</span>&lt;Datum Uhrzeit&gt; - &lt;Titel&gt;.mp4</code> ab.</p>
 
 <h2>Verarbeitung</h2>
+<div class="cards" id="cards"></div>
+<div id="running"></div>
+<div class="small" id="workers"></div>
+<details id="done-panel" style="margin-top:1rem">
+  <summary id="done-summary">Aufgehobene Originale</summary>
+  <div style="margin:.6rem 0"><button type="button" id="done-delete-all">Alle Originale löschen</button></div>
+  <table><thead><tr><th>Kanal / Titel</th><th>MP4</th><th>Größe</th><th>fertig seit</th><th></th></tr></thead><tbody id="done-rows"></tbody></table>
+</details>
 <table>
   <thead><tr><th>Status</th><th>Kanal / Titel</th><th>Ziel</th><th>Größe</th><th></th></tr></thead>
   <tbody id="jobs"><tr><td colspan="5" class="muted">Lade …</td></tr></tbody>
@@ -82,8 +99,15 @@
     <span class="small">Ordner unterhalb des Ausgabeordners, z.B. für eine übersichtliche Jellyfin-Bibliothek. Gilt für neue Aufnahmen.</span>
     <label for="keep_source">Original behalten</label><input type="checkbox" id="keep_source" style="width:auto">
     <span class="small">Die aufgenommene .ts-Datei nach der Umwandlung im Arbeitsordner (<code>done/</code>) aufheben statt löschen.</span>
+    <label for="done_retention_days">Originale löschen nach (Tage)</label><input type="number" id="done_retention_days" required>
+    <span class="small">Aufgehobene .ts-Dateien in <code>done/</code> werden nach so vielen Tagen automatisch gelöscht (einmal pro Stunde, vom Recorder). 0 = nie.</span>
     <label for="audio_normalize">Lautstärke normalisieren</label><input type="checkbox" id="audio_normalize" style="width:auto">
-    <span class="small">loudnorm auf -14 LUFS, Audio als AAC 192k (Video wird nur kopiert). Aus: Audio wird unverändert übernommen.</span>
+    <span class="small">loudnorm auf -14 LUFS, Audio als AAC 192k. Aus: Audio wird unverändert übernommen.</span>
+    <label for="video_codec">Video-Codec</label><input type="text" id="video_codec" list="codecs" required>
+    <span class="small"><code>copy</code> übernimmt das Video unverändert (schnell, verlustfrei). Ein Codec wie <code>libx264</code>, <code>libx265</code> oder <code>libsvtav1</code> kodiert neu – deutlich langsamer, Qualität/Größe über eigene Parameter steuern (z.B. <code>-crf 23 -preset medium</code>).</span>
+    <datalist id="codecs"><option value="copy"><option value="libx264"><option value="libx265"><option value="libsvtav1"><option value="libvpx-vp9"></datalist>
+    <label for="ffmpeg_args">Eigene ffmpeg-Parameter</label><input type="text" id="ffmpeg_args" placeholder="z.B. -crf 23 -preset medium">
+    <span class="small">Werden direkt vor der Ausgabedatei angehängt und überschreiben damit die Optionen oben (z.B. <code>-c:a copy</code>, <code>-vf scale=-2:720</code>). Nicht erlaubt: <code>-i</code>, <code>-progress</code>, <code>-y</code>, <code>-n</code>. Gilt für neue Aufnahmen und für „Erneut versuchen“.</span>
     <div class="actions"><button type="submit">Speichern</button><button type="button" id="settings-reset">Auf Standard (Umgebungsvariablen) zurücksetzen</button></div>
   </form>
   <div id="smsg"></div>
@@ -179,7 +203,7 @@ document.getElementById("add").addEventListener("submit", async (ev) => {
   try { await api("POST", "/api/streams", body); ev.target.reset(); showError(); await load(); } catch (e) { showError(e); }
 });
 
-const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "audio_normalize"];
+const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "done_retention_days", "audio_normalize", "video_codec", "ffmpeg_args"];
 const LAYOUT_HINT = { none: "/", year: "/&lt;Jahr&gt;/", year_month: "/&lt;Jahr&gt;/&lt;Monat&gt;/", date: "/&lt;Datum&gt;/", output_year_month: "-&lt;Jahr&gt;/&lt;Monat&gt;/" };
 
 function fillSettings(data) {
@@ -231,8 +255,74 @@ function renderJobs(data) {
   }
 }
 
+function formatDuration(seconds) {
+  if (seconds == null) return "–";
+  seconds = Math.max(0, Math.round(seconds));
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
+  return h ? `${h} h ${String(m).padStart(2, "0")} min` : m ? `${m} min ${String(s).padStart(2, "0")} s` : `${s} s`;
+}
+
+function card(num, label, cls = "") {
+  return el("div", { class: `card ${cls}` }, el("div", { class: "num" }, String(num)), el("div", { class: "label" }, label));
+}
+
+function renderOverview(data) {
+  const c = data.counts;
+  document.getElementById("cards").replaceChildren(
+    card(c.open, "Jobs offen"),
+    card(c.running, "Jobs laufen"),
+    card(`${c.workers_online}`, `Worker online${c.workers_total > c.workers_online ? ` (von ${c.workers_total})` : ""}`, c.workers_online ? "good" : (c.open ? "bad" : "")),
+    card(c.completed, "Jobs abgeschlossen"),
+    card(c.failed, "fehlgeschlagen", c.failed ? "bad" : ""),
+    card(c.recording, "Aufnahmen laufen"),
+    card(c.done, `Originale aufgehoben (${formatSize(c.done_size)})`));
+  renderDone(data.done || [], c.done_size);
+
+  const running = document.getElementById("running");
+  running.replaceChildren();
+  for (const r of data.running) {
+    const pct = Math.round((r.progress || 0) * 100);
+    running.append(el("div", { class: "run" },
+      el("div", {}, el("div", {}, r.channel || r.id), el("div", { class: "small" }, r.title || "")),
+      el("div", {}, el("progress", { max: 1, value: r.progress || 0 }), el("div", { class: "small" }, `${pct} % · ${r.converter || "?"}`)),
+      el("div", { class: "small" }, `läuft ${formatDuration(r.elapsed_seconds)}`, el("br"), `Rest ca. ${formatDuration(r.eta_seconds)}`)));
+  }
+
+  const workers = data.workers.map((w) => `${w.online ? "●" : "○"} ${w.name}: ${w.online ? (w.state === "busy" ? "arbeitet" : "bereit") : `offline (zuletzt vor ${formatDuration(w.last_seen_seconds)})`}`);
+  const recent = data.recent.map((r) => `${new Date(r.finished * 1000).toLocaleString()} ${r.file}`);
+  document.getElementById("workers").innerHTML = "";
+  document.getElementById("workers").append(
+    el("div", {}, workers.length ? `Worker: ${workers.join(" · ")}` : "Noch kein Konverter hat sich gemeldet."),
+    recent.length ? el("div", {}, `Zuletzt fertig: ${recent.join(" · ")}`) : null);
+  renderJobs(data.jobs);
+}
+
+function renderDone(done, totalSize) {
+  document.getElementById("done-summary").textContent = `Aufgehobene Originale (${done.length}, ${formatSize(totalSize)})`;
+  document.getElementById("done-delete-all").disabled = !done.length;
+  const rows = document.getElementById("done-rows");
+  rows.replaceChildren();
+  if (!done.length) rows.append(el("tr", {}, el("td", { colSpan: 5, class: "muted" }, "Keine aufgehobenen Originale.")));
+  for (const d of done.slice().reverse()) {
+    rows.append(el("tr", {},
+      el("td", {}, el("div", {}, d.channel || d.id), el("div", { class: "small" }, d.title || "")),
+      el("td", { class: "small" }, d.converted_to || ""),
+      el("td", { class: "small" }, formatSize(d.size)),
+      el("td", { class: "small" }, new Date(d.done_ts * 1000).toLocaleString()),
+      el("td", {}, el("button", { onclick: async () => {
+        if (!confirm(`Original von „${d.title || d.id}“ löschen? Die MP4 bleibt erhalten.`)) return;
+        try { await api("DELETE", `/api/done/${d.id}`); loadJobs(); } catch (e) { showError(e); }
+      } }, "Löschen"))));
+  }
+}
+
+document.getElementById("done-delete-all").addEventListener("click", async () => {
+  if (!confirm("Alle aufgehobenen Originale (.ts) löschen? Die MP4-Dateien bleiben erhalten.")) return;
+  try { await api("DELETE", "/api/done"); loadJobs(); } catch (e) { showError(e); }
+});
+
 async function loadJobs() {
-  try { renderJobs(await api("GET", "/api/jobs")); } catch (e) { showError(e); }
+  try { renderOverview(await api("GET", "/api/overview")); } catch (e) { showError(e); }
 }
 
 async function loadSettings() {

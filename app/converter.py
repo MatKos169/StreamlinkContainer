@@ -15,14 +15,17 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 from . import jobs
 from .naming import clean_output_path
 from .settings import SettingsError, env, load_settings, parse_int
+from .streams import parse_ffmpeg_args
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 10
+PROGRESS_SECONDS = 2
 OUTPUT_NAME = "output.mp4"
 METADATA_NAME = "metadata.ffmeta"
 NO_CATEGORY = "Ohne Kategorie"
@@ -135,13 +138,36 @@ class Converter:
         self.ffprobe = ffprobe
         self.poll_seconds = poll_seconds
         self.progress = 0.0
+        self.current_job = None
+        self.started = time.time()
 
     @property
     def work(self):
         return self.settings.work_dir
 
+    def beat_worker(self):
+        try:
+            jobs.worker_heartbeat(self.work, self.name, "busy" if self.current_job else "idle", self.current_job,
+                                  self.progress if self.current_job else None, self.poll_seconds, self.started)
+        except OSError as error:
+            logger.warning("Could not write worker heartbeat: %s", type(error).__name__)
+
+    def _worker_heartbeats(self, stop_event):
+        while not stop_event.wait(HEARTBEAT_SECONDS):
+            self.beat_worker()
+
     def run(self, stop_event):
         jobs.ensure_dirs(self.work)
+        self.beat_worker()
+        beater = threading.Thread(target=self._worker_heartbeats, args=(stop_event,), daemon=True)
+        beater.start()
+        try:
+            self._loop(stop_event)
+        finally:
+            beater.join(HEARTBEAT_SECONDS + 1)
+            jobs.remove_worker(self.work, self.name)
+
+    def _loop(self, stop_event):
         while not stop_event.is_set():
             try:
                 for job_id in jobs.requeue_stale(self.work):
@@ -164,9 +190,14 @@ class Converter:
         except ValueError:
             raise ConversionError(f"ffprobe could not read the video: {result.stderr.strip()[-300:]}") from None
 
-    def ffmpeg_command(self, video, metadata, output, normalize=True):
-        """Video is always copied. Audio is either normalized like the MatKos169/ffmpeg
-        container (loudnorm -14 LUFS, AAC 192k) or copied as is."""
+    def ffmpeg_command(self, video, metadata, output, normalize=True, video_codec="copy", extra_args=()):
+        """Build the ffmpeg call.
+
+        Video: copied by default, or encoded with video_codec. Audio: normalized like
+        the MatKos169/ffmpeg container (loudnorm -14 LUFS, AAC 192k) or copied.
+        extra_args (from the UI) come right before the output file, so they win
+        over the options above (ffmpeg uses the last value given).
+        """
         if normalize:
             audio = ["-af", LOUDNORM, "-c:a", "aac", "-b:a", AUDIO_BITRATE]
         else:
@@ -175,7 +206,8 @@ class Converter:
             self.ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
             "-i", video, "-f", "ffmetadata", "-i", metadata,
             "-map", "0:v?", "-map", "0:a?", "-map_metadata", "1", "-map_chapters", "1",
-            "-c:v", "copy", *audio, "-movflags", "+faststart",
+            "-c:v", video_codec or "copy", *audio, "-movflags", "+faststart",
+            *extra_args,
             output,
         ]
 
@@ -184,6 +216,7 @@ class Converter:
         stderr_lines = []
         reader = threading.Thread(target=lambda: stderr_lines.extend(process.stderr), daemon=True)
         reader.start()
+        last_progress = 0.0
         for line in process.stdout:
             if stop_event.is_set():
                 process.terminate()
@@ -192,6 +225,12 @@ class Converter:
             key, _, value = line.strip().partition("=")
             if key in ("out_time_us", "out_time_ms") and value.isdigit() and duration > 0:
                 self.progress = min(int(value) / 1_000_000 / duration, 1.0)
+                if time.monotonic() - last_progress >= PROGRESS_SECONDS:
+                    last_progress = time.monotonic()
+                    try:
+                        jobs.heartbeat(path, self.name, self.progress)
+                    except OSError:
+                        pass
         code = process.wait()
         reader.join(5)
         if stop_event.is_set():
@@ -209,6 +248,8 @@ class Converter:
 
     def process(self, job_id, path, stop_event):
         self.progress = 0.0
+        self.current_job = job_id
+        self.beat_worker()
         done = threading.Event()
         beater = threading.Thread(target=self._heartbeats, args=(path, done), daemon=True)
         beater.start()
@@ -217,6 +258,9 @@ class Converter:
         finally:
             done.set()
             beater.join(5)
+            self.current_job = None
+            self.progress = 0.0
+            self.beat_worker()
 
     def _process(self, job_id, path, stop_event):
         job = jobs.read_job(path)
@@ -231,7 +275,15 @@ class Converter:
             metadata = os.path.join(path, METADATA_NAME)
             with open(metadata, "w", encoding="utf-8") as f:
                 f.write(build_metadata(job, chapters))
-            command = self.ffmpeg_command(video, metadata, output, normalize=job.get("audio_normalize", True))
+            try:
+                extra_args = parse_ffmpeg_args(job.get("ffmpeg_args"))
+            except ValueError as error:
+                raise ConversionError(str(error)) from None
+            command = self.ffmpeg_command(video, metadata, output, normalize=job.get("audio_normalize", True),
+                                          video_codec=job.get("video_codec") or "copy", extra_args=extra_args)
+            logger.info("%s: video %s, audio %s%s", job_id, job.get("video_codec") or "copy",
+                        "normalized" if job.get("audio_normalize", True) else "copy",
+                        f", extra: {' '.join(extra_args)}" if extra_args else "")
             self.run_ffmpeg(command, path, duration, stop_event)
             if not jobs.still_owner(path, self.name):
                 logger.warning("Lost the claim on %s (heartbeat too old?), discarding result", job_id)
@@ -254,8 +306,16 @@ class Converter:
 
         relative = os.path.relpath(final, self.settings.recordings_dir)
         logger.info("Done: %s -> %s (%d chapters)", job_id, relative, len(chapters))
+        try:
+            jobs.record_completed(self.work, job_id, {
+                "channel": job.get("channel"), "title": job.get("title"), "file": relative,
+                "converter": self.name, "chapters": len(chapters), "duration": round(duration, 1),
+                "size": os.path.getsize(final),
+            })
+        except OSError as error:
+            logger.warning("Could not write history entry: %s", type(error).__name__)
         if job.get("keep_source"):
-            job.update(converted_to=relative, converted_by=self.name, converted_at=_now_iso())
+            job.update(converted_to=relative, converted_by=self.name, converted_at=_now_iso(), done_ts=time.time())
             jobs.write_job(path, job)
             _quiet_remove(os.path.join(path, jobs.CLAIM_FILE))
             _quiet_remove(os.path.join(path, METADATA_NAME))

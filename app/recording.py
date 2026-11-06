@@ -82,6 +82,12 @@ class ChapterWriter:
             self._file = None
 
 
+def conversion_settings(options):
+    """The options a converter needs; stored in job.json (converters have no /config)."""
+    return {"audio_normalize": options.audio_normalize, "video_codec": options.video_codec,
+            "ffmpeg_args": options.ffmpeg_args}
+
+
 def default_session_factory():
     import streamlink
     return streamlink.Streamlink()
@@ -164,7 +170,7 @@ class Recording(threading.Thread):
             "id": self.job_id, "channel": self.stream.channel, "title": info.title,
             "category": info.category, "quality": quality, "destination": destination,
             "keep_source": self.options.keep_source,
-            "audio_normalize": self.options.audio_normalize,
+            **conversion_settings(self.options),
             "started_at": started.astimezone().isoformat(timespec="seconds"),
         })
         part = os.path.join(path, f"video.{stream_extension(selected)}.part")
