@@ -15,7 +15,10 @@ RUN apk add --no-cache tzdata
 COPY --from=builder /install /usr/local
 RUN python -m pip uninstall -y pip setuptools \
     && rm -rf /usr/local/lib/python3.*/ensurepip \
-    && mkdir -p /config /recordings /work
+    && mkdir -p /config /recordings /work \
+    && chown 1027:100 /config /recordings /work
+# Owned by the default user, so new named Docker volumes (docker volume create /
+# -v name:/work) are writable at once; they take over this ownership on first use.
 # Works with a read-only root filesystem: no bytecode writes, streamlink cache under /tmp.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -12,7 +12,7 @@ Fork of [liofal/streamlink](https://github.com/liofal/streamlink); the converter
 **Documentation (German):**
 [CONFIGURATION.md](docs/CONFIGURATION.md): all environment variables and features ·
 [ARCHITECTURE.md](docs/ARCHITECTURE.md): how the containers communicate ·
-[DEPLOYMENT.md](docs/DEPLOYMENT.md): example setups with Jellyfin and a NAS
+[DEPLOYMENT.md](docs/DEPLOYMENT.md): example setups with Jellyfin and a NAS, also single containers with `docker run` (no Compose) and SMB volumes
 
 ## Containers
 
@@ -210,3 +210,5 @@ python -m pytest -q
 | `app/streams.py` | `streams.json` model, validation, atomic writes |
 | `app/naming.py` | Safe file/folder names |
 | `app/settings.py` | Environment settings |
+| `app/healthcheck.py` | Recorder healthcheck (`python -m app.healthcheck`) |
+| `app/tls.py` | Self-signed certificate for HTTPS |

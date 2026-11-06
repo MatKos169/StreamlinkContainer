@@ -20,6 +20,10 @@ Alle drei Dienste laufen aus demselben Quellcode. `recorder` und `web` nutzen da
 | `converter` | `python -m app.converter` | Wandelt Aufnahmen in MP4 mit Kapiteln um und legt sie in der Mediathek ab. Beliebig viele, auch auf anderen Hosts |
 | `web` | `python -m app.web` | Weboberfläche und JSON-API auf Port 8080 |
 
+Healthcheck für den Recorder: `python -m app.healthcheck` (in `docker-compose.yml` eingetragen,
+bei `docker run` per `--health-cmd`). Ohne Compose startet man jeden Container einzeln, siehe
+[DEPLOYMENT.md](DEPLOYMENT.md#einzelne-container-ohne-compose).
+
 ## Wo welche Einstellung herkommt
 
 Es gibt zwei Arten von Einstellungen:

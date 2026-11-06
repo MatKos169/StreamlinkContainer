@@ -7,6 +7,7 @@ Repository auf dem jeweiligen Docker-Host liegt
 Wie die Container zusammenarbeiten: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 - [Grundsätze](#grundsätze)
+- [Einzelne Container ohne Compose](#einzelne-container-ohne-compose)
 - [Beispiel 1: Ein Docker-Host, NAS als Mediathek](#beispiel-1-ein-docker-host-nas-als-mediathek)
 - [Beispiel 2: Alles auf einer Synology](#beispiel-2-alles-auf-einer-synology)
 - [Beispiel 3: Verteilt mit mehreren Konvertern](#beispiel-3-verteilt-mit-mehreren-konvertern)
@@ -35,6 +36,149 @@ Wie die Container zusammenarbeiten: [ARCHITECTURE.md](ARCHITECTURE.md).
   ```bash
   cp clientid.env.example clientid.env   # TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET eintragen
   ```
+
+## Einzelne Container ohne Compose
+
+Die Container reden nicht miteinander, sie teilen sich nur Volumes. Deshalb lässt sich jeder
+einzeln mit `docker run` betreiben, ohne Compose und ohne gemeinsames Docker-Netz. Die Befehle
+unten sind auf ct666 so getestet: lokale Volumes, Recorder, Web und Konverter einzeln, Test-Job
+bis in die Mediathek. Die SMB-Varianten sind **nicht getestet**.
+
+### Images bauen und verteilen
+
+Im Repo-Ordner, einmal pro Version:
+
+```bash
+docker build --target runner    -t streamlink-recorder:latest .   # recorder und web
+docker build --target converter -t streamlink-converter:latest .  # converter (mit ffmpeg)
+```
+
+Auf einen anderen Host ohne Registry bringen:
+
+```bash
+docker save streamlink-converter:latest | ssh host-b docker load
+```
+
+Oder das Repo dort klonen und selbst bauen.
+
+### Volumes
+
+Jedes Volume kann lokal oder eine SMB-Freigabe sein. Die Container sehen in beiden Fällen nur
+`/config`, `/work` bzw. `/recordings`.
+
+| Variante | Anlegen | Hinweise |
+|---|---|---|
+| **Lokales Docker-Volume** | `docker volume create streamlink-work` | Getestet. Neue Volumes gehören automatisch `1027:100` (aus dem Image), passend zu `--user 1027:100` |
+| **Host-Ordner** | `-v /srv/streamlink/work:/work` | Ordner vorher anlegen und `chown 1027:100` |
+| **SMB-Freigabe auf dem Host eingehängt** (empfohlen für SMB) | `/etc/fstab`, dann `-v /mnt/nas/media/Twitch:/recordings` | Zugangsdaten in einer Datei auf dem Host, siehe unten |
+| **SMB als Docker-Volume** | `docker volume create --driver local --opt type=cifs …` | Kein Eintrag auf dem Host nötig. Das Passwort steht aber in den Volume-Optionen (`docker volume inspect` zeigt es jedem mit Docker-Zugriff) |
+
+SMB auf dem Host einhängen (`/etc/fstab`, Paket `cifs-utils`):
+
+```fstab
+//192.168.1.5/media  /mnt/nas/media  cifs  credentials=/root/.smb-nas,uid=1027,gid=100,file_mode=0664,dir_mode=0775,vers=3.1.1,seal,_netdev  0 0
+```
+
+Dazu `/root/.smb-nas` mit den Rechten `600`:
+```
+username=streamlink
+password=geheim
+```
+
+SMB als Docker-Volume:
+
+```bash
+docker volume create --driver local \
+  --opt type=cifs \
+  --opt device=//192.168.1.5/media/Twitch \
+  --opt o=addr=192.168.1.5,username=streamlink,password=geheim,uid=1027,gid=100,file_mode=0664,dir_mode=0775,vers=3.1.1,seal \
+  streamlink-media
+```
+
+- `addr=` als IP angeben: Ohne den Helfer `mount.cifs` löst der Kernel keine Hostnamen auf.
+- `uid`/`gid` müssen zu `--user` passen. Auf SMB gelten Besitzer und Rechte pauschal für den
+  ganzen Mount, `chmod` hat keine Wirkung.
+- `seal` verschlüsselt den SMB-Verkehr (SMB3).
+- **In einem unprivilegierten Proxmox-LXC funktionieren SMB-Mounts nicht** (weder fstab noch
+  Docker-Volume). Dann auf dem Proxmox-Host einhängen und per `mp0` durchreichen, siehe
+  [Proxmox-LXC](#proxmox-lxc).
+
+**Welche Volumes dürfen auf SMB liegen?**
+
+| Volume | SMB | Begründung |
+|---|---|---|
+| `/recordings` | **ja, empfohlen** | Nur der Konverter schreibt dorthin, je Datei einmal unter einem versteckten Namen, dann wird umbenannt |
+| `/work` | nur wenn Konverter auf **anderen** Hosts laufen, sonst lokal | Ein Ordner lässt sich auf SMB nicht umbenennen, solange darin eine Datei offen ist. Die Warteschlange beruht aber auf dem Umbenennen von Job-Ordnern. Mit Samba (Synology, TrueNAS) vorher testen |
+| `/config` | **nein** | Die Rechte `0600` für den TLS-Schlüssel lassen sich auf SMB nicht durchsetzen. Klein, gehört lokal zu recorder und web |
+
+### Gemeinsame Optionen
+
+Für alle drei Container gleich (wie in den Compose-Dateien):
+
+```bash
+COMMON="--user 1027:100 --read-only --tmpfs /tmp --cap-drop ALL \
+  --security-opt no-new-privileges:true --restart unless-stopped"
+```
+
+### Die drei Container
+
+```bash
+# Recorder: braucht Twitch-Zugangsdaten, /config und /work
+docker run -d --name streamlink-recorder $COMMON \
+  --env-file default.env --env-file clientid.env \
+  -v streamlink-config:/config -v streamlink-work:/work \
+  --memory 1g --stop-timeout 60 \
+  --health-cmd "python -m app.healthcheck" --health-interval 1m --health-start-period 2m \
+  streamlink-recorder:latest
+
+# Web: /config und /work, Port 8080 per HTTPS
+docker run -d --name streamlink-web $COMMON \
+  --env-file default.env -e TLS_HOSTNAMES=192.168.1.10 \
+  -v streamlink-config:/config -v streamlink-work:/work \
+  -p 8080:8080 --memory 128m \
+  streamlink-recorder:latest python -m app.web
+
+# Konverter: /work und /recordings, beliebig oft (eindeutiger Name je Instanz)
+docker run -d --name streamlink-converter $COMMON \
+  --env-file default.env -e CONVERTER_NAME=host-a \
+  -v streamlink-work:/work -v streamlink-media:/recordings \
+  --stop-timeout 40 \
+  streamlink-converter:latest
+```
+
+- `--stop-timeout` gibt laufenden Aufnahmen bzw. Umwandlungen Zeit, sich sauber zu beenden
+  (Aufnahme wird eingereiht, Umwandlung geht zurück in die Warteschlange).
+- Der Web-Container braucht `/work` nur für die Übersicht und das Löschen bzw. Wiederholen von
+  Jobs. Ohne `/work` laufen Kanäle, Einstellungen und VOD-Downloads trotzdem.
+
+### Daten von A nach B
+
+**Variante 1 (empfohlen): alles auf Host A, Mediathek auf dem NAS.** `/config` und `/work`
+sind lokale Volumes. Nur `/recordings` ist die SMB-Freigabe. Der Konverter legt jede fertige MP4
+auf das NAS. Dort liest Jellyfin, egal auf welchem Host es läuft.
+
+```
+Host A:  recorder ─► work (lokal) ─► converter ─► media (SMB) ═══► NAS ◄─── Jellyfin
+         web ─► config (lokal)
+```
+
+**Variante 2: Konverter auf einem anderen Host.** Dann muss `/work` auf beiden Hosts dasselbe
+sein, also eine Freigabe (NFS oder, mit Test, SMB). Host A: recorder und web mit `work` als
+Freigabe. Host B: converter mit `work` und `media` als Freigaben.
+
+```
+Host A:  recorder, web ─► work (Freigabe) ◄═══ NAS ═══► work + media ◄─ converter (Host B)
+```
+
+### Aktualisieren
+
+```bash
+docker build --target runner -t streamlink-recorder:latest .     # bzw. converter
+docker rm -f streamlink-recorder && docker run -d --name streamlink-recorder …   # gleicher Befehl wie oben
+```
+
+Die Volumes bleiben erhalten. Laufende Aufnahmen werden beim Stoppen sauber eingereiht. Lieber
+aktualisieren, wenn gerade nichts live ist, weil sonst eine Aufnahme in zwei Dateien zerfällt.
 
 ## Beispiel 1: Ein Docker-Host, NAS als Mediathek
 
@@ -272,7 +416,7 @@ die Jobs lange liegen. Für gemischte Hosts lieber `copy` lassen.
 
 ## Proxmox-LXC
 
-- **Unprivilegierte LXC-Container** können keine NFS-Freigaben selbst einhängen. Stattdessen die
+- **Unprivilegierte LXC-Container** können weder NFS- noch SMB-Freigaben selbst einhängen (auch nicht als Docker-Volume). Stattdessen die
   Freigabe auf dem Proxmox-Host einhängen und per Bind-Mount in den Container geben:
   ```bash
   # auf dem Proxmox-Host

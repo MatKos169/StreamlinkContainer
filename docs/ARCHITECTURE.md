@@ -1,6 +1,8 @@
 # Technische Kommunikation zwischen den Containern
 
-Die Container sprechen **nicht über das Netzwerk miteinander**. Sie tauschen sich ausschließlich
+Die Container sprechen **nicht über das Netzwerk miteinander** und brauchen daher weder Compose
+noch ein gemeinsames Docker-Netz: Sie können einzeln mit `docker run` auf beliebigen Hosts laufen
+(siehe [DEPLOYMENT.md](DEPLOYMENT.md#einzelne-container-ohne-compose)). Sie tauschen sich ausschließlich
 über Dateien auf gemeinsamen Volumes aus. Die einzigen Netzwerkverbindungen sind der Browser zum
 Webinterface (HTTPS) und der Recorder zu Twitch (HTTPS), siehe
 [Verbindungen](#verbindungen-nach-außen). Dadurch:
@@ -176,7 +178,7 @@ versuchen“ schreibt das Webinterface die aktuellen Werte in den Job.
 |---|---|---|
 | Takt der Recorder-Schleife | 1 s | `recorder.STEP_SECONDS` |
 | `status.json` neu schreiben | bei jeder Änderung, sonst alle 30 s | `recorder.STATUS_HEARTBEAT_SECONDS` |
-| Healthcheck Recorder | `status.json` älter als 120 s = ungesund | `docker-compose.yml` |
+| Healthcheck Recorder (`python -m app.healthcheck`) | `status.json` älter als 120 s = ungesund | `healthcheck.MAX_AGE` |
 | „Recorder reagiert nicht“ im Webinterface | `status.json` älter als 90 s | `index.html` |
 | Aufräumen von `done/` | stündlich | `recorder.PRUNE_SECONDS` |
 | Lebenszeichen der Konverter (Job und Worker) | 10 s | `converter.HEARTBEAT_SECONDS` |
