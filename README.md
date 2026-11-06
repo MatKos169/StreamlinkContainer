@@ -9,6 +9,11 @@ output folder, organized by year/month for Jellyfin.
 Fork of [liofal/streamlink](https://github.com/liofal/streamlink); the converter follows
 [MatKos169/ffmpeg](https://github.com/MatKos169/ffmpeg).
 
+**Documentation (German):**
+[CONFIGURATION.md](docs/CONFIGURATION.md): all environment variables and features ·
+[ARCHITECTURE.md](docs/ARCHITECTURE.md): how the containers communicate ·
+[DEPLOYMENT.md](docs/DEPLOYMENT.md): example setups with Jellyfin and a NAS
+
 ## Containers
 
 | Service | What it does | Volumes |
