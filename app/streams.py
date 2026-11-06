@@ -80,8 +80,10 @@ OPTION_LIMITS = {
     "vod_parallel": (1, 5),
     "max_parallel_streams": (0, 100),   # live recordings + VOD downloads; 0 = no limit
     "slot_cooldown": (0, 3600),         # seconds a channel keeps its slot after a stream end
+    "auth_validation_interval": (300, 86400),
 }
 VOD_MODES = ("realtime", "download")
+AUTH_INVALID_POLICIES = ("without_token", "skip")
 VOD_SPEED_LIMITS = (0.25, 20.0)
 
 
@@ -104,6 +106,8 @@ class Options:
     vod_parallel: int = 1               # VOD downloads at the same time
     max_parallel_streams: int = 0       # Twitch streams at once (recordings + VODs); VODs only start below it
     slot_cooldown: int = 120            # after a stream end its slot stays reserved this long (0 = not at all)
+    auth_validation_interval: int = 3600   # seconds between checks of app credentials and OAuth token
+    auth_invalid_policy: str = "without_token"   # invalid OAuth token: without_token (record with ads) or skip
 
     def merged(self, overrides):
         """Return a copy with validated overrides applied (None values are ignored)."""
@@ -124,6 +128,9 @@ class Options:
                     raise ValueError(f"folder_layout must be one of {', '.join(FOLDER_LAYOUTS)}")
             elif key in ("keep_source", "audio_normalize"):
                 value = _parse_bool(value, key)
+            elif key == "auth_invalid_policy":
+                if value not in AUTH_INVALID_POLICIES:
+                    raise ValueError(f"auth_invalid_policy must be one of {', '.join(AUTH_INVALID_POLICIES)}")
             elif key == "vod_mode":
                 if value not in VOD_MODES:
                     raise ValueError(f"vod_mode must be one of {', '.join(VOD_MODES)}")

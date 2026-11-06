@@ -262,3 +262,18 @@ async def test_api_errors_are_json(settings):
             assert r.status >= 400 and "error" in await r.json(), (method, path)
     finally:
         await client.close()
+
+
+
+async def test_auth_check_api(settings):
+    client = await client_for(settings)
+    try:
+        assert (await (await client.post("/api/auth/check", json={})).json()) == {"requested": True}
+        assert os.path.exists(os.path.join(settings.config_dir, "commands", "check-auth"))
+        assert (await client.post("/api/auth/check", data="", headers={"Content-Type": "text/plain"})).status == 415
+        data = await (await client.put("/api/settings", json={"auth_invalid_policy": "skip", "auth_validation_interval": 600})).json()
+        assert (data["settings"]["auth_invalid_policy"], data["settings"]["auth_validation_interval"]) == ("skip", 600)
+        assert (await client.put("/api/settings", json={"auth_invalid_policy": "exit"})).status == 400
+        assert (await client.put("/api/settings", json={"auth_validation_interval": 299})).status == 400
+    finally:
+        await client.close()

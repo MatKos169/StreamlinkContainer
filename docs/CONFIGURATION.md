@@ -55,6 +55,7 @@ Spalte „Dienst“: **R** = recorder, **C** = converter, **W** = web.
 | `TWITCH_CLIENT_SECRET` | `clientsecret` | – (Pflicht) | R | Secret dieser App |
 | `TWITCH_OAUTH_TOKEN` | `TWITCH_AUTH_TOKEN`, `oauthtoken` | – | R | Optional: Browser-Cookie `auth-token` eines Twitch-Kontos. Damit gelten Turbo/Abos (werbefrei), und abonnentenexklusive VODs lassen sich laden. Wie ein Passwort behandeln |
 
+Beide werden regelmäßig geprüft, siehe [Prüfung der Zugangsdaten](#prüfung-der-twitch-zugangsdaten).
 Die Client-ID und das Secret werden nur für die offizielle Helix-API benutzt: Live-Status und
 Kategorie, VOD-Metadaten. Der OAuth-Token geht nur an Twitchs API (streamlink-Option
 `api-header`), nie an die Video-CDN.
@@ -107,6 +108,8 @@ Normalerweise nicht ändern, die Compose-Dateien hängen die Volumes genau dort 
 | `RESCAN_INTERVAL` | `10` | 5–600 s | Nachprüfung alle | Nach dem Ende eines Streams wird der Kanal so oft direkt über streamlink geprüft |
 | `RESCAN_DURATION` | `120` | 0–3600 s | Nachprüfung für | Wie lange nach Stream-Ende schnell geprüft wird. `0` schaltet die Nachprüfung ab |
 | `MAX_PARALLEL_STREAMS` | `0` | 0–100 | Max. parallele Twitch-Streams | Live-Aufnahmen plus VOD-Downloads. Ist das Limit erreicht, startet kein neuer VOD-Download. Live-Aufnahmen laufen immer. `0` = kein Limit |
+| `TWITCH_AUTH_VALIDATION_INTERVAL` (`authvalidationinterval`) | `3600` | 300–86400 s | Zugangsdaten prüfen alle | Wie oft App-Zugang und OAuth-Token geprüft werden |
+| `TWITCH_AUTH_INVALID_POLICY` (`authinvalidpolicy`) | `without_token` | `without_token`, `skip` | Bei ungültigem OAuth-Token | `without_token`: ohne Token weiter aufnehmen (mit Werbung, keine Abo-VODs). `skip`: Aufnahmen und VOD-Downloads aussetzen. Die alten Upstream-Werte `exit` und `notify` werden als `skip` übernommen |
 | `SLOT_COOLDOWN` | `120` | 0–3600 s | Platz reservieren nach Stream-Ende | So lange hält ein Kanal nach Stream-Ende seinen Platz im Limit. `0` = sofort frei |
 | `FOLDER_LAYOUT` | `output_year_month` | siehe unten | Unterordner | Ordnerstruktur in der Mediathek |
 | `KEEP_SOURCE` | `true` | true/false | Original behalten | Die aufgenommene `.ts` nach der Umwandlung in `/work/done/` aufheben statt löschen |
@@ -153,6 +156,30 @@ Diese werden nur von `docker-compose.yml` und `docker-compose.converter.yml` aus
 - **Aktiv** abwählen stoppt eine laufende Aufnahme. Entfernen ebenso.
 - Statusspalte: nimmt auf / live / offline / Nachprüfung / Fehler, dazu aktuelle Kategorie und
   Titel sowie die Zieldatei der laufenden oder letzten Aufnahme.
+
+### Prüfung der Twitch-Zugangsdaten
+
+- **App-Zugang** (`TWITCH_CLIENT_ID`/`SECRET`): Der Recorder holt beim Start und alle
+  `TWITCH_AUTH_VALIDATION_INTERVAL` Sekunden ein neues App-Token bei Twitch. Auch jede
+  erfolgreiche bzw. abgelehnte Live-Abfrage aktualisiert den Status. So fällt ein falsches Secret
+  auf, auch wenn noch kein Kanal eingetragen ist.
+- **OAuth-Token** (`TWITCH_OAUTH_TOKEN`): Prüfung über den offiziellen Endpunkt
+  `https://id.twitch.tv/oauth2/validate`. Geprüft wird beim Start, im selben Intervall, sofort nach
+  einer fehlgeschlagenen Aufnahme (höchstens einmal pro Minute) und per Button **„Jetzt prüfen“**.
+  Das Ergebnis enthält das Konto und, falls Twitch eines meldet, das Ablaufdatum.
+- **Weboberfläche:**
+  - Eine Statuszeile zeigt „App-Zugang: gültig · OAuth-Token: gültig (konto), läuft ab in …“.
+  - Ein roter Hinweis erscheint bei ungültigem App-Zugang, bei ungültigem Token oder wenn der Token
+    in weniger als 7 Tagen abläuft.
+- **Ungültiger OAuth-Token**, je nach `TWITCH_AUTH_INVALID_POLICY`:
+  - `without_token` (Standard): Neue Aufnahmen und VOD-Downloads laufen ohne Token. Es gibt dann
+    Werbung, und abonnentenexklusive VODs gehen nicht, aber es geht kein Stream verloren.
+  - `skip`: Neue Aufnahmen und VOD-Downloads starten nicht, bis ein gültiger Token gesetzt ist.
+    Danach den Recorder neu starten.
+  - Laufende Aufnahmen werden in beiden Fällen nicht abgebrochen.
+- Konnte Twitch nicht geprüft werden (Netzwerk, Twitch nicht erreichbar), gilt das letzte sichere
+  Ergebnis weiter.
+- Token und Secret erscheinen nie in Logs, `status.json` oder der Weboberfläche.
 
 ### Live-Aufnahme
 

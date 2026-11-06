@@ -24,6 +24,10 @@ an [MatKos169/ffmpeg](https://github.com/MatKos169/ffmpeg).
   - Kapitel, Titel, Kanal, Datum.
   - Lautstärke-Normalisierung (loudnorm -14 LUFS).
   - Video wird kopiert oder mit wählbarem Codec neu kodiert, eigene ffmpeg-Parameter möglich.
+- **Prüfung der Twitch-Zugangsdaten:**
+  - App-Zugang und OAuth-Token werden regelmäßig und auf Knopfdruck geprüft, mit Hinweis vor dem
+    Ablauf des Tokens.
+  - Bei ungültigem Token wird wahlweise ohne Token weiter aufgenommen oder ausgesetzt.
 - **Ordnerstruktur für Jellyfin**, z. B. `Name-2026/11/2026-11-06 20-15-00 - Titel.mp4`.
 - **Mehrere Konverter**, auch auf anderen Hosts, über einen gemeinsamen Arbeitsordner.
 - **Übersicht:** offene, laufende, abgeschlossene und fehlgeschlagene Jobs, Worker online,
@@ -99,6 +103,7 @@ python -m pytest -q
 | `app/twitch.py` | Helix-API (Live-Status, VOD-Metadaten) |
 | `app/streams.py`, `app/settings.py` | Kanäle und Einstellungen, Umgebungsvariablen |
 | `app/naming.py` | Sichere Datei- und Ordnernamen, Ordnerstruktur |
+| `app/auth.py` | Prüfung von App-Zugang und OAuth-Token |
 | `app/tls.py`, `app/healthcheck.py` | HTTPS-Zertifikat, Healthcheck des Recorders |
 | `tests/` | pytest-Tests |
 

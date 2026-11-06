@@ -61,11 +61,12 @@ Rechten (umask) angelegt, damit Konverter auf anderen Hosts sie lesen können.
 | Datei | Schreibt | Liest | Inhalt |
 |---|---|---|---|
 | `streams.json` | web | recorder, web | `settings` (Einstellungen aus dem Webinterface) und `streams` (Kanäle: `id`, `channel`, `output`, `quality`, `enabled`) |
-| `status.json` | recorder | web, Healthcheck | Zustand des Recorders: Zeitpunkt, Einstellungen, Twitch-Fehler, Status je Kanal, laufende Downloads, belegte Stream-Plätze |
+| `status.json` | recorder | web, Healthcheck | Zustand des Recorders: Zeitpunkt, Einstellungen, Twitch-Fehler, Prüfung der Zugangsdaten (`auth`), Status je Kanal, laufende Downloads, belegte Stream-Plätze |
 | `downloads/<id>.json` | web (anlegen) | recorder | Wartender oder laufender VOD-Download (`url`, `video_id`, `output`, `quality`, `mode`, `speed`) |
 | `downloads/<id>.cancel` | web | recorder | Abbruch-Markierung. Der Recorder bricht ab und löscht Auftrag und Markierung |
 | `downloads/<id>.failed.json` | recorder | web | Fehlgeschlagener Download inkl. `error`. „Erneut versuchen“ (web) macht wieder `<id>.json` daraus |
 | `commands/release-<stream-id>` | web | recorder | „Platz freigeben“. Der Recorder hebt die Reservierung auf und löscht die Datei |
+| `commands/check-auth` | web | recorder | „Jetzt prüfen“. Der Recorder prüft App-Zugang und OAuth-Token sofort und löscht die Datei |
 
 Regeln:
 - **Jede Datei hat genau einen Schreiber.** Der zweite Beteiligte gibt Wünsche über eigene
@@ -181,6 +182,8 @@ versuchen“ schreibt das Webinterface die aktuellen Werte in den Job.
 | Healthcheck Recorder (`python -m app.healthcheck`) | `status.json` älter als 120 s = ungesund | `healthcheck.MAX_AGE` |
 | „Recorder reagiert nicht“ im Webinterface | `status.json` älter als 90 s | `index.html` |
 | Aufräumen von `done/` | stündlich | `recorder.PRUNE_SECONDS` |
+| Prüfung App-Zugang und OAuth-Token | beim Start, dann alle `auth_validation_interval` (Standard 3600 s), nach fehlgeschlagener Aufnahme höchstens 1×/min | `Supervisor._check_auth` |
+| OAuth-Prüfung, Zeitlimit | 15 s, läuft in einem eigenen Thread | `auth.VALIDATE_TIMEOUT` |
 | Lebenszeichen der Konverter (Job und Worker) | 10 s | `converter.HEARTBEAT_SECONDS` |
 | Fortschritt in `claim.json` | alle 2 s | `converter.PROGRESS_SECONDS` |
 | Verwaister Job zurück in `queue/` | nach 600 s ohne Lebenszeichen | `jobs.STALE_SECONDS` |
@@ -218,6 +221,7 @@ nur aus `ALLOWED_NETWORKS`.
 | `PUT /api/streams/{id}` | Kanal ändern (einzelne Felder) |
 | `DELETE /api/streams/{id}` | Kanal entfernen |
 | `POST /api/streams/{id}/release-slot` | Reservierten Stream-Platz freigeben |
+| `POST /api/auth/check` | Twitch-Zugangsdaten jetzt prüfen (Ergebnis in `status.auth`) |
 | `GET /api/status` | Inhalt von `status.json` |
 | `GET /api/settings` | Wirksame Einstellungen, Standardwerte, gespeicherte Werte, Grenzen |
 | `PUT /api/settings` | Einstellungen setzen: `{name: wert}`, `{name: null}` = zurück zum Standard |
@@ -235,7 +239,8 @@ nur aus `ALLOWED_NETWORKS`.
 
 | Von | Ziel | Wofür |
 |---|---|---|
-| recorder | `id.twitch.tv`, `api.twitch.tv` (Helix) | App-Token, Live-Status, Kategorien, VOD-Metadaten |
+| recorder | `id.twitch.tv`, `api.twitch.tv` (Helix) | App-Token (auch zur Prüfung von Client-ID/Secret), Live-Status, Kategorien, VOD-Metadaten |
+| recorder | `id.twitch.tv/oauth2/validate` | Prüfung des OAuth-Tokens (offizieller Endpunkt) |
 | recorder | Twitch über streamlink (`gql.twitch.tv`, `usher.ttvnw.net`, Video-CDN) | Zugriffstoken, Playlists und Videosegmente. Das macht das Twitch-Plugin von streamlink |
 | Browser im LAN | web (HTTPS, TLS ≥ 1.2, selbstsigniert oder eigenes Zertifikat) | Weboberfläche und API |
 | converter, web | – | Keine Verbindungen nach außen |

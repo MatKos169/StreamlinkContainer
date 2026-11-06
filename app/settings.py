@@ -87,6 +87,13 @@ class Settings:
         return os.path.join(self.config_dir, "status.json")
 
 
+LEGACY_AUTH_POLICIES = {"exit": "skip", "notify": "skip"}   # upstream values; both stopped recording
+
+
+def _auth_policy(value):
+    return LEGACY_AUTH_POLICIES.get(value, value)
+
+
 def load_defaults():
     """Option defaults from env (CHECK_INTERVAL, DEFAULT_QUALITY, RESCAN_INTERVAL, RESCAN_DURATION)."""
     try:
@@ -107,6 +114,8 @@ def load_defaults():
             "vod_parallel": env("VOD_PARALLEL"),
             "max_parallel_streams": env("MAX_PARALLEL_STREAMS"),
             "slot_cooldown": env("SLOT_COOLDOWN"),
+            "auth_validation_interval": env("TWITCH_AUTH_VALIDATION_INTERVAL", "authvalidationinterval"),
+            "auth_invalid_policy": _auth_policy(env("TWITCH_AUTH_INVALID_POLICY", "authinvalidpolicy")),
         })
     except ValueError as error:
         raise SettingsError(str(error)) from None

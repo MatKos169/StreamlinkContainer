@@ -221,6 +221,28 @@ paths:
                       - type: "null"
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/auth/check:
+    post:
+      tags: [Status]
+      summary: Twitch-Zugangsdaten jetzt prüfen
+      description: |
+        Bittet den Recorder, App-Zugang (Client-ID/Secret) und OAuth-Token sofort zu prüfen.
+        Das Ergebnis steht nach wenigen Sekunden in `GET /api/status` unter `status.auth`.
+      operationId: checkAuth
+      requestBody: { $ref: "#/components/requestBodies/Empty" }
+      responses:
+        "200":
+          description: Prüfung angefordert
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requested]
+                properties:
+                  requested: { type: boolean, const: true }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "415": { $ref: "#/components/responses/NotJson" }
+
   /api/overview:
     get:
       tags: [Verarbeitung]
@@ -538,6 +560,11 @@ components:
         vod_parallel: { type: integer, minimum: 1, maximum: 5 }
         max_parallel_streams: { type: integer, minimum: 0, maximum: 100, description: 0 = kein Limit }
         slot_cooldown: { type: integer, minimum: 0, maximum: 3600 }
+        auth_validation_interval: { type: integer, minimum: 300, maximum: 86400 }
+        auth_invalid_policy:
+          type: string
+          enum: [without_token, skip]
+          description: "Ungültiger OAuth-Token: ohne Token weiter aufnehmen (mit Werbung) oder Aufnahmen und VOD-Downloads aussetzen"
 
     SettingsPatch:
       type: object
@@ -560,6 +587,8 @@ components:
         vod_parallel: { type: [integer, string, "null"] }
         max_parallel_streams: { type: [integer, string, "null"] }
         slot_cooldown: { type: [integer, string, "null"] }
+        auth_validation_interval: { type: [integer, string, "null"] }
+        auth_invalid_policy: { type: [string, "null"] }
 
     SettingsResponse:
       type: object
@@ -644,6 +673,27 @@ components:
         streams_cooldown: { type: integer }
         streams_limit: { type: integer }
         downloads_blocked: { type: boolean }
+        auth:
+          type: object
+          description: Ergebnis der Prüfung der Twitch-Zugangsdaten
+          properties:
+            app: { $ref: "#/components/schemas/CredentialCheck" }
+            oauth: { $ref: "#/components/schemas/CredentialCheck" }
+            oauth_known_invalid: { type: boolean, description: Zuletzt sicher festgestellt ungültig (eine nicht mögliche Prüfung ändert das nicht) }
+            policy: { type: string, enum: [without_token, skip] }
+            token_in_use: { type: boolean, description: Aufnahmen verwenden den OAuth-Token }
+            blocked: { type: boolean, description: Aufnahmen und Downloads ausgesetzt (ungültiger Token, Einstellung skip) }
+
+    CredentialCheck:
+      type: object
+      properties:
+        state: { type: string, enum: [valid, invalid, unknown, not_configured] }
+        login: { type: [string, "null"], description: Twitch-Konto des OAuth-Tokens }
+        expires_at: { type: [string, "null"], format: date-time }
+        expires_in: { type: [integer, "null"], description: Sekunden bis zum Ablauf, null = kein Ablauf gemeldet }
+        expiring_soon: { type: boolean, description: Läuft in weniger als 7 Tagen ab }
+        detail: { type: [string, "null"], description: Fehlertyp, nie eine Fehlermeldung oder der Token }
+        checked_at: { type: [string, "null"], format: date-time }
 
     Claim:
       type: [object, "null"]

@@ -19,7 +19,7 @@ import threading
 import os
 import time
 
-from . import jobs, vod
+from . import auth, jobs, vod
 from .recording import Recording
 from .settings import SettingsError, load_settings
 from .streams import load_config, write_json_atomic
@@ -66,6 +66,10 @@ class Supervisor:
         self.downloads = {}       # request id -> running VodDownload
         self.download_errors = 0
         self.downloads_blocked = False   # a pending download waits for max_parallel_streams
+        self.oauth = auth.OAuthChecker(settings.oauth_token)
+        self.app_auth = auth.CheckResult(auth.UNKNOWN)
+        self._next_auth_check = 0.0
+        self._next_forced_oauth = 0.0
 
     # -- config ---------------------------------------------------------
 
@@ -102,9 +106,53 @@ class Supervisor:
 
     # -- recordings -----------------------------------------------------
 
+    # -- Twitch credentials ---------------------------------------------
+
+    def auth_blocks_recording(self):
+        """Invalid OAuth token and policy "skip": no new recordings or downloads."""
+        return self.oauth.is_invalid() and self.options.auth_invalid_policy == "skip"
+
+    def worker_settings(self):
+        """Settings for recordings/downloads: without the OAuth token once it is known to be invalid
+        (policy "without_token"), so recording goes on, with ads."""
+        if self.oauth.is_invalid() and self.settings.oauth_token:
+            return dataclasses.replace(self.settings, oauth_token=None)
+        return self.settings
+
+    def _check_auth(self, now, force=False):
+        """Check app credentials and OAuth token at start, every auth_validation_interval, and on demand."""
+        if not force and now < self._next_auth_check:
+            return
+        self._next_auth_check = now + self.options.auth_validation_interval
+        self._dirty = True
+        if self.twitch is not None and hasattr(self.twitch, "authenticate"):
+            self.app_auth = auth.validate_app_credentials(self.twitch)
+            if self.app_auth.state != auth.VALID:
+                logger.error("Twitch app credentials (client id/secret): %s (%s)", self.app_auth.state, self.app_auth.detail)
+        self.oauth.start()
+
+    def _suspect_oauth(self, now):
+        """A recording failed while a token is in use: check the token again soon (at most once a minute)."""
+        if self.settings.oauth_token and not self.oauth.is_invalid() and now >= self._next_forced_oauth:
+            self._next_forced_oauth = now + 60
+            if self.oauth.start():
+                logger.info("Recording failed, checking the Twitch OAuth token")
+
+    def auth_status(self):
+        now = self.wallclock()
+        return {"app": self.app_auth.as_status(now), "oauth": self.oauth.result.as_status(now),
+                "oauth_known_invalid": self.oauth.is_invalid(), "policy": self.options.auth_invalid_policy,
+                "token_in_use": bool(self.worker_settings().oauth_token), "blocked": self.auth_blocks_recording()}
+
+    # -- recordings -----------------------------------------------------
+
     def _start(self, stream, info, reason, quiet=False):
+        if self.auth_blocks_recording():
+            if not quiet:
+                logger.error("%s is live but recording is skipped: Twitch OAuth token is invalid (policy skip)", stream.channel)
+            return
         resolved = dataclasses.replace(stream, quality=stream.quality or self.options.default_quality)
-        rec = self.recording_factory(resolved, info, self.settings, self.options)
+        rec = self.recording_factory(resolved, info, self.worker_settings(), self.options)
         rec.probe = quiet          # quick re-check after a stream end (counts only once it records)
         self.recordings[stream.id] = rec
         rec.start()
@@ -120,6 +168,8 @@ class Supervisor:
                 continue
             del self.recordings[sid]
             self._dirty = True
+            if rec.state == "error":
+                self._suspect_oauth(now)
             if rec.file:  # it actually recorded: remember it and watch for a quick restart
                 self.last_result[sid] = {"state": rec.state, "error": rec.error, "file": rec.file, "at": _iso(self.wallclock())}
                 if target is not None and self.options.slot_cooldown > 0:
@@ -139,10 +189,14 @@ class Supervisor:
             self.twitch_error = None
         except Exception as error:
             self.twitch_error = error_summary(error)
+            if type(error).__name__ == "TwitchAuthorizationException":
+                self.app_auth = auth.CheckResult(auth.INVALID, detail=self.twitch_error, checked_at=self.wallclock())
             self.live = None
             logger.error("Twitch check failed: %s", self.twitch_error)
             return
         self.live = live
+        if logins:
+            self.app_auth = auth.CheckResult(auth.VALID, checked_at=self.wallclock())
         for sid, stream in wanted.items():
             info = live.get(stream.channel)
             if info is None:
@@ -175,6 +229,8 @@ class Supervisor:
         now = self.clock()
         self.reload_config()
         wanted = {s.id: s for s in self.streams if s.enabled}
+        self._process_commands()
+        self._check_auth(now)
         self._reap(wanted, now)
         if now >= self.next_check:
             self._check_twitch(wanted, now)
@@ -184,7 +240,7 @@ class Supervisor:
         self._manage_downloads()
         signature = tuple((sid, rec.state, rec.file) for sid, rec in sorted(self.recordings.items()))
         signature += tuple((rid, d.state, int((d.progress or 0) * 100)) for rid, d in sorted(self.downloads.items()))
-        signature += (self.active_streams(), self.cooldown_streams())
+        signature += (self.active_streams(), self.cooldown_streams(), self.oauth.result.state, self.app_auth.state)
         if signature != self._rec_signature:
             self._rec_signature = signature
             self._dirty = True
@@ -194,11 +250,12 @@ class Supervisor:
     # -- VOD downloads --------------------------------------------------
 
     def _default_download(self, request, channel_outputs):
+        settings = self.worker_settings()
         fetcher = None
         if self.settings.client_id and self.settings.client_secret:
             # Own client per download: TwitchClient is not thread-safe.
             fetcher = lambda video_id: TwitchClient(self.settings.client_id, self.settings.client_secret).get_video(video_id)
-        return vod.VodDownload(request, self.settings, self.options, channel_outputs=channel_outputs,
+        return vod.VodDownload(request, settings, self.options, channel_outputs=channel_outputs,
                                metadata_fetcher=fetcher)
 
     def _recording_ids(self):
@@ -213,24 +270,32 @@ class Supervisor:
         """Channels holding a slot only because of the cooldown (no recording running)."""
         return len(set(self.cooldown) - self._recording_ids())
 
-    def _update_cooldowns(self, wanted, now):
-        """Expire cooldowns, drop them for removed/disabled channels or when recording again,
-        and apply "Platz freigeben" requests from the web UI (/config/commands/release-<id>)."""
+    def _process_commands(self):
+        """Requests from the web UI as marker files in /config/commands:
+        release-<stream id> ("Platz freigeben"), check-auth ("Jetzt prüfen")."""
         folder = os.path.join(self.settings.config_dir, "commands")
         try:
             commands = os.listdir(folder)
         except FileNotFoundError:
-            commands = []
+            return
         for name in commands:
             if name.startswith("release-"):
                 sid = name[len("release-"):]
                 if self.cooldown.pop(sid, None) is not None:
                     logger.info("Stream slot of %s released from the web UI", sid)
-                try:
-                    os.remove(os.path.join(folder, name))
-                except FileNotFoundError:
-                    pass
-                self._dirty = True
+            elif name == "check-auth":
+                logger.info("Checking Twitch credentials (requested in the web UI)")
+                self._check_auth(self.clock(), force=True)
+            else:
+                continue
+            try:
+                os.remove(os.path.join(folder, name))
+            except FileNotFoundError:
+                pass
+            self._dirty = True
+
+    def _update_cooldowns(self, wanted, now):
+        """Expire cooldowns; drop them for removed/disabled channels or when recording again."""
         recording = self._recording_ids()
         for sid, until in list(self.cooldown.items()):
             if now >= until or sid not in wanted or sid in recording:
@@ -268,7 +333,7 @@ class Supervisor:
                 vod.finish_request(config_dir, request)
                 self._dirty = True
                 continue
-            if len(self.downloads) >= self.options.vod_parallel:
+            if len(self.downloads) >= self.options.vod_parallel or self.auth_blocks_recording():
                 break
             limit = self.options.max_parallel_streams
             if limit and self.active_streams() >= limit:
@@ -351,6 +416,7 @@ class Supervisor:
             "streams_cooldown": self.cooldown_streams(),
             "streams_limit": self.options.max_parallel_streams,
             "downloads_blocked": self.downloads_blocked,
+            "auth": self.auth_status(),
         }
         try:
             write_json_atomic(self.settings.status_file, data)

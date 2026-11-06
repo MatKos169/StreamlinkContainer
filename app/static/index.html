@@ -138,6 +138,11 @@
     <span class="small">Live-Aufnahmen und VOD-Downloads zusammen. Ist das Limit erreicht, startet kein neuer VOD-Download; Live-Aufnahmen laufen immer. Nach einem Stream-Ende bleibt der Platz für die eingestellte Reservierungszeit belegt. 0 = kein Limit.</span>
     <label for="slot_cooldown">Platz reservieren nach Stream-Ende (s)</label><input type="number" id="slot_cooldown" required>
     <span class="small">So lange hält ein Kanal nach dem Ende seines Streams seinen Platz im Limit, falls der Stream wiederkommt. In der Kanalliste per „Platz freigeben“ vorzeitig lösbar. 0 = sofort frei.</span>
+    <label for="auth_validation_interval">Zugangsdaten prüfen alle (s)</label><input type="number" id="auth_validation_interval" required>
+    <span class="small">Wie oft App-Zugang (Client-ID/Secret) und OAuth-Token bei Twitch geprüft werden. Zusätzlich beim Start, nach einer fehlgeschlagenen Aufnahme und per „Jetzt prüfen“.</span>
+    <label for="auth_invalid_policy">Bei ungültigem OAuth-Token</label>
+    <select id="auth_invalid_policy"><option value="without_token">ohne Token weiter aufnehmen (mit Werbung)</option><option value="skip">Aufnahmen und VOD-Downloads aussetzen</option></select>
+    <span class="small">Ohne Token wird weiter aufgenommen, nur Werbung und Abo-VODs sind betroffen. „Aussetzen“ verpasst Streams, bis der Token erneuert ist.</span>
     <label for="ffmpeg_args">Eigene ffmpeg-Parameter</label><input type="text" id="ffmpeg_args" placeholder="z.B. -crf 23 -preset medium">
     <span class="small">Werden direkt vor der Ausgabedatei angehängt und überschreiben damit die Optionen oben (z.B. <code>-c:a copy</code>, <code>-vf scale=-2:720</code>). Nicht erlaubt: <code>-i</code>, <code>-progress</code>, <code>-y</code>, <code>-n</code>. Gilt für neue Aufnahmen und für „Erneut versuchen“.</span>
     <div class="actions"><button type="submit">Speichern</button><button type="button" id="settings-reset">Auf Standard (Umgebungsvariablen) zurücksetzen</button></div>
@@ -222,6 +227,29 @@ function render() {
   const age = (Date.now() - Date.parse(status.updated_at)) / 1000;
   const stale = age > 90;  // the recorder rewrites status.json at least every 30s
   info.textContent = `Recorder zuletzt aktiv: ${new Date(status.updated_at).toLocaleString()} · Prüfintervall ${status.check_interval}s · nächste Prüfung in ${status.next_check_in ?? "?"}s` + (stale ? " · RECORDER REAGIERT NICHT" : "");
+  const a = status.auth || {};
+  const authLine = [];
+  if (a.app) authLine.push(`App-Zugang: ${{valid: "gültig", invalid: "UNGÜLTIG", unknown: "nicht geprüft"}[a.app.state] || a.app.state}`);
+  if (a.oauth && a.oauth.state !== "not_configured") {
+    const o = a.oauth;
+    authLine.push(`OAuth-Token: ${{valid: "gültig", invalid: "UNGÜLTIG", unknown: "nicht prüfbar"}[o.state] || o.state}`
+      + (o.login ? ` (${o.login})` : "")
+      + (o.expires_in ? `, läuft ab in ${formatDuration(o.expires_in)}` : o.state === "valid" ? ", kein Ablauf gemeldet" : ""));
+  } else if (a.oauth) authLine.push("OAuth-Token: nicht gesetzt");
+  if (authLine.length) {
+    const line = el("div", { class: "muted" }, authLine.join(" · ") + " ");
+    line.append(el("button", { onclick: async () => {
+      try { await api("POST", "/api/auth/check", {}); setTimeout(load, 3000); } catch (e) { showError(e); }
+    } }, "Jetzt prüfen"));
+    banners.append(line);
+  }
+  if (a.app && a.app.state === "invalid") banners.append(el("div", { class: "banner" },
+    "Twitch-App-Zugang ungültig: TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET prüfen. Ohne gültigen App-Zugang werden keine Streams erkannt."));
+  if (a.oauth_known_invalid) banners.append(el("div", { class: "banner" }, a.policy === "skip"
+    ? "Twitch-OAuth-Token ungültig: Aufnahmen und VOD-Downloads sind ausgesetzt (Einstellung „Bei ungültigem Token“). Token in TWITCH_OAUTH_TOKEN erneuern."
+    : "Twitch-OAuth-Token ungültig: Es wird ohne Token aufgenommen (mit Werbung, keine Abo-VODs). Token in TWITCH_OAUTH_TOKEN erneuern."));
+  else if (a.oauth && a.oauth.expiring_soon) banners.append(el("div", { class: "banner" },
+    `Twitch-OAuth-Token läuft in ${formatDuration(a.oauth.expires_in)} ab – bitte erneuern.`));
   if (status.twitch_error) banners.append(el("div", { class: "banner" }, `Twitch-Abfrage fehlgeschlagen: ${status.twitch_error}`));
   if (status.config_error) banners.append(el("div", { class: "banner" }, `streams.json ungültig: ${status.config_error}`));
 }
@@ -240,7 +268,7 @@ document.getElementById("add").addEventListener("submit", async (ev) => {
   try { await api("POST", "/api/streams", body); ev.target.reset(); showError(); await load(); } catch (e) { showError(e); }
 });
 
-const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "done_retention_days", "audio_normalize", "video_codec", "ffmpeg_args", "vod_mode", "vod_speed", "vod_segment_threads", "vod_parallel", "max_parallel_streams", "slot_cooldown"];
+const OPTION_FIELDS = ["check_interval", "default_quality", "rescan_interval", "rescan_duration", "folder_layout", "keep_source", "done_retention_days", "audio_normalize", "video_codec", "ffmpeg_args", "vod_mode", "vod_speed", "vod_segment_threads", "vod_parallel", "max_parallel_streams", "slot_cooldown", "auth_validation_interval", "auth_invalid_policy"];
 const LAYOUT_HINT = { none: "/", year: "/&lt;Jahr&gt;/", year_month: "/&lt;Jahr&gt;/&lt;Monat&gt;/", date: "/&lt;Datum&gt;/", output_year_month: "-&lt;Jahr&gt;/&lt;Monat&gt;/" };
 
 function fillSettings(data) {

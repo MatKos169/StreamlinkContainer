@@ -76,6 +76,18 @@ class TwitchClient:
         return {"title": video.title or "", "login": (video.user_login or "").lower(),
                 "created_at": video.created_at, "duration": parse_twitch_duration(video.duration)}
 
+    async def _authenticate(self):
+        from twitchAPI.twitch import Twitch
+        self._twitch = await Twitch(self.client_id, self.client_secret)
+
+    def authenticate(self):
+        """Get a fresh app access token: checks that client id and secret are accepted."""
+        try:
+            self._loop.run_until_complete(asyncio.wait_for(self._authenticate(), TWITCH_CALL_TIMEOUT))
+        except BaseException:
+            self._twitch = None
+            raise
+
     def get_live(self, logins):
         """Return {login: LiveInfo} for the live channels among logins. Raises on API errors."""
         if not logins:

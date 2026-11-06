@@ -154,6 +154,16 @@ async def release_slot(request):
     return web.json_response({"released": sid})
 
 
+async def check_auth(request):
+    """Ask the recorder to check the Twitch credentials now (result appears in /api/status)."""
+    await _read_json(request)
+    folder = os.path.join(request.app[SETTINGS_KEY].config_dir, "commands")
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "check-auth"), "w"):
+        pass
+    return web.json_response({"requested": True})
+
+
 def _settings_response(app, config):
     defaults = app[SETTINGS_KEY].defaults
     return web.json_response({
@@ -322,6 +332,7 @@ def create_app(settings):
         web.delete("/api/streams/{id}", delete_stream),
         web.post("/api/streams/{id}/release-slot", release_slot),
         web.get("/api/status", get_status),
+        web.post("/api/auth/check", check_auth),
         web.get("/api/settings", get_settings),
         web.put("/api/settings", update_settings),
         web.get("/api/jobs", list_jobs),
